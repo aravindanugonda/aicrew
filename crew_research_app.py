@@ -14,8 +14,7 @@ import requests
 # Suppress Pydantic warnings about callback functions
 warnings.filterwarnings("ignore", message=".*is not a Python type.*")
 
-# Load environment variables from .env file for DEFAULT VALUES ONLY
-# These will be overridden by session state and never saved back to environment
+# Load environment variables from .env file (for local development)
 load_dotenv()
 
 # Set page config
@@ -98,12 +97,13 @@ class LinkUpSearchTool(BaseTool):
             return f"Error searching with LinkUp: {str(e)}"
 
 # Initialize session state for API keys if they don't exist
+# On first load, try to get values from environment variables
 if "gemini_api_key" not in st.session_state:
-    st.session_state.gemini_api_key = ""
+    st.session_state.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 if "serper_api_key" not in st.session_state:
-    st.session_state.serper_api_key = ""
+    st.session_state.serper_api_key = os.environ.get("SERPER_API_KEY", "")
 if "linkup_api_key" not in st.session_state:
-    st.session_state.linkup_api_key = ""
+    st.session_state.linkup_api_key = os.environ.get("LINKUP_API_KEY", "")
 
 # Sidebar for API key input
 with st.sidebar:
