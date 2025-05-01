@@ -387,14 +387,16 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
         analysis_task = Task(
             description=f"Analyze the research findings on {full_topic}. Identify key trends, patterns, insights, and implications. {verify_instruction}",
             agent=analyst,
-            expected_output="In-depth analysis with key insights, trends, and interpretation of the research findings."
+            expected_output="In-depth analysis with key insights, trends, and interpretation of the research findings.",
+            context=[research_task]
         )
         
         # Create writing task
         writing_task = Task(
             description=f"Using the research and analysis, create a comprehensive report on {full_topic}. The report should be well-structured, informative, and accessible to a general audience.",
             agent=writer,
-            expected_output="A complete, well-structured report on the topic with all key information presented clearly."
+            expected_output="A complete, well-structured report on the topic with all key information presented clearly.",
+            context=[analysis_task]
         )
         
         # Define callback functions for step and task logging
