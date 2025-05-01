@@ -14,7 +14,8 @@ import requests
 # Suppress Pydantic warnings about callback functions
 warnings.filterwarnings("ignore", message=".*is not a Python type.*")
 
-# Load environment variables from .env file
+# Load environment variables from .env file for DEFAULT VALUES ONLY
+# These will be overridden by session state and never saved back to environment
 load_dotenv()
 
 # Set page config
@@ -35,7 +36,7 @@ class LinkUpSearchInput(BaseModel):
     depth: str = Field(default="standard", description="Depth of search: 'standard' or 'deep'")
     output_type: str = Field(default="searchResults", description="Output type: 'searchResults', 'sourcedAnswer', or 'structured'")
 
-# Global variable to store the LinkUp API key
+# Global variable to store the LinkUp API key for the current execution only
 LINKUP_API_KEY = ""
 
 class LinkUpSearchTool(BaseTool):
@@ -96,6 +97,14 @@ class LinkUpSearchTool(BaseTool):
         except Exception as e:
             return f"Error searching with LinkUp: {str(e)}"
 
+# Initialize session state for API keys if they don't exist
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = ""
+if "serper_api_key" not in st.session_state:
+    st.session_state.serper_api_key = ""
+if "linkup_api_key" not in st.session_state:
+    st.session_state.linkup_api_key = ""
+
 # Sidebar for API key input
 with st.sidebar:
     st.header("Configuration")
@@ -108,45 +117,37 @@ with st.sidebar:
         help="Select which search API to use for research, or use no search tool"
     )
     
-    # Try to get API keys from environment variables first
-    gemini_api_key_env = os.environ.get("GEMINI_API_KEY", "")
-    serper_api_key_env = os.environ.get("SERPER_API_KEY", "")
-    linkup_api_key_env = os.environ.get("LINKUP_API_KEY", "")
-    
-    # API key inputs - prefilled if available in environment
+    # API key inputs using session state
     gemini_api_key = st.text_input(
         "Google API Key", 
-        value=gemini_api_key_env,
+        value=st.session_state.gemini_api_key,
         type="password",
         help="Enter your Gemini API key from Google AI Studio"
     )
+    # Store in session state (not in environment variables)
+    st.session_state.gemini_api_key = gemini_api_key
     
     # Show the appropriate API key input based on selection
     if search_provider == "Serper.dev":
         serper_api_key = st.text_input(
             "Serper API Key", 
-            value=serper_api_key_env,
+            value=st.session_state.serper_api_key,
             type="password",
             help="Enter your Serper.dev API key for web search capabilities"
         )
+        # Store in session state (not in environment variables)
+        st.session_state.serper_api_key = serper_api_key
     elif search_provider == "LinkUp.so":
         linkup_api_key = st.text_input(
             "LinkUp API Key", 
-            value=linkup_api_key_env,
+            value=st.session_state.linkup_api_key,
             type="password",
             help="Enter your LinkUp.so API key for web search capabilities"
         )
-        # Set the global variable
+        # Store in session state (not in environment variables)
+        st.session_state.linkup_api_key = linkup_api_key
+        # Set the global variable for current execution only
         LINKUP_API_KEY = linkup_api_key
-    
-    # Save API keys to environment variables
-    if gemini_api_key:
-        os.environ["GEMINI_API_KEY"] = gemini_api_key
-    
-    if search_provider == "Serper.dev" and serper_api_key:
-        os.environ["SERPER_API_KEY"] = serper_api_key
-    elif search_provider == "LinkUp.so" and linkup_api_key:
-        os.environ["LINKUP_API_KEY"] = linkup_api_key
     
     # Advanced options
     with st.expander("Advanced Options"):
@@ -440,11 +441,12 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
 
 # Run research when button is clicked
 if start_research:
-    if "GEMINI_API_KEY" not in os.environ or not os.environ["GEMINI_API_KEY"]:
+    # Check for API keys in session state, NOT in environment variables
+    if not st.session_state.gemini_api_key:
         progress_placeholder.error("Please enter your Gemini API key in the sidebar")
-    elif search_provider == "Serper.dev" and ("SERPER_API_KEY" not in os.environ or not os.environ["SERPER_API_KEY"]):
+    elif search_provider == "Serper.dev" and not st.session_state.serper_api_key:
         progress_placeholder.error("Please enter your Serper API key in the sidebar")
-    elif search_provider == "LinkUp.so" and ("LINKUP_API_KEY" not in os.environ or not os.environ["LINKUP_API_KEY"]):
+    elif search_provider == "LinkUp.so" and not st.session_state.linkup_api_key:
         progress_placeholder.error("Please enter your LinkUp API key in the sidebar")
     else:
         with results_container:
@@ -452,10 +454,10 @@ if start_research:
                 research_result = run_crewai_research(
                     topic=research_topic,
                     focus=research_focus if research_focus else None,
-                    gemini_api_key=os.environ["GEMINI_API_KEY"],
+                    gemini_api_key=st.session_state.gemini_api_key,
                     search_provider=search_provider,
-                    serper_api_key=os.environ.get("SERPER_API_KEY", None),
-                    linkup_api_key=os.environ.get("LINKUP_API_KEY", None),
+                    serper_api_key=st.session_state.serper_api_key,
+                    linkup_api_key=st.session_state.linkup_api_key,
                     model=gemini_model,
                     temp=temperature,
                     show_details=show_agent_details
