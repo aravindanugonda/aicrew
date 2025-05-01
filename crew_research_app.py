@@ -1,45 +1,152 @@
-
-# filename: crew_research_app.py
 import os
+import json
+from typing import Type
 import streamlit as st
 from crewai import Agent, Task, Crew, LLM, Process
+from crewai.tools import BaseTool
+from crewai_tools import SerperDevTool
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import traceback
+import warnings
+import requests
+
+# Suppress Pydantic warnings about callback functions
+warnings.filterwarnings("ignore", message=".*is not a Python type.*")
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Set page config
 st.set_page_config(
-    page_title="CrewAI Research Assistant",
+    page_title="AICrew Research Assistant",
     page_icon="🔍",
     layout="wide"
 )
 
 # App title and description
-st.title("🔍 CrewAI Research Assistant")
+st.title("🔍 AICrew Research Assistant")
 st.markdown("Research any topic using multiple AI agents powered by Gemini")
+
+# LinkUp Search Tool implementation
+class LinkUpSearchInput(BaseModel):
+    """Input schema for LinkUp Search Tool."""
+    query: str = Field(description="The search query to perform")
+    depth: str = Field(default="standard", description="Depth of search: 'standard' or 'deep'")
+    output_type: str = Field(default="searchResults", description="Output type: 'searchResults', 'sourcedAnswer', or 'structured'")
+
+# Global variable to store the LinkUp API key
+LINKUP_API_KEY = ""
+
+class LinkUpSearchTool(BaseTool):
+    name: str = "web_search"
+    description: str = "Search the web for information using LinkUp and return comprehensive results"
+    args_schema: Type[BaseModel] = LinkUpSearchInput
+
+    def _run(self, query: str, depth: str = "standard", output_type: str = "searchResults") -> str:
+        """Execute LinkUp search and return results."""
+        try:
+            # Use the global API key
+            api_key = LINKUP_API_KEY
+            
+            # Set up request to LinkUp API
+            base_url = "https://api.linkup.so/v1/search"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Prepare the request based on LinkUp's API documentation
+            data = {
+                "q": query,
+                "outputType": output_type,
+                "depth": depth
+            }
+            
+            # Make the API call
+            response = requests.post(
+                base_url, 
+                headers=headers, 
+                json=data
+            )
+            response.raise_for_status()
+            
+            results = response.json()
+            
+            # Format the results
+            formatted_text = "Search Results:\n\n"
+            
+            # Extract results based on LinkUp API response format
+            if "results" in results:
+                for i, item in enumerate(results["results"], 1):
+                    name = item.get("name", "No title")
+                    url = item.get("url", "No link")
+                    snippet = item.get("snippet", "No description")
+                    
+                    formatted_text += f"{i}. {name}\n"
+                    formatted_text += f"   URL: {url}\n"
+                    formatted_text += f"   Description: {snippet}\n\n"
+            else:
+                # Handle alternative response structure
+                formatted_text += "Results structure not recognized. Raw data:\n"
+                formatted_text += json.dumps(results, indent=2)
+                
+            return formatted_text
+            
+        except Exception as e:
+            return f"Error searching with LinkUp: {str(e)}"
 
 # Sidebar for API key input
 with st.sidebar:
     st.header("Configuration")
     
-    # Try to get API key from environment variables first
-    api_key_env = os.environ.get("GEMINI_API_KEY", "")
-    
-    # API key input - prefilled if available in environment
-    api_key = st.text_input(
-        "Google API Key", 
-        value=api_key_env,
-        type="password",
-        help="Enter your Gemini API key from Google AI Studio (or store it in a .env file as GEMINI_API_KEY)"
+    # Add search provider selection
+    search_provider = st.selectbox(
+        "Search Provider",
+        options=["No Search Tool (Use LLM Knowledge Only)", "Serper.dev", "LinkUp.so"],
+        index=0,
+        help="Select which search API to use for research, or use no search tool"
     )
     
-    # Save API key to environment variable
-    if api_key:
-        os.environ["GEMINI_API_KEY"] = api_key
-        if not api_key_env:  # Only show success if it wasn't already in env
-            st.success("API key set successfully!")
+    # Try to get API keys from environment variables first
+    gemini_api_key_env = os.environ.get("GEMINI_API_KEY", "")
+    serper_api_key_env = os.environ.get("SERPER_API_KEY", "")
+    linkup_api_key_env = os.environ.get("LINKUP_API_KEY", "")
+    
+    # API key inputs - prefilled if available in environment
+    gemini_api_key = st.text_input(
+        "Google API Key", 
+        value=gemini_api_key_env,
+        type="password",
+        help="Enter your Gemini API key from Google AI Studio"
+    )
+    
+    # Show the appropriate API key input based on selection
+    if search_provider == "Serper.dev":
+        serper_api_key = st.text_input(
+            "Serper API Key", 
+            value=serper_api_key_env,
+            type="password",
+            help="Enter your Serper.dev API key for web search capabilities"
+        )
+    elif search_provider == "LinkUp.so":
+        linkup_api_key = st.text_input(
+            "LinkUp API Key", 
+            value=linkup_api_key_env,
+            type="password",
+            help="Enter your LinkUp.so API key for web search capabilities"
+        )
+        # Set the global variable
+        LINKUP_API_KEY = linkup_api_key
+    
+    # Save API keys to environment variables
+    if gemini_api_key:
+        os.environ["GEMINI_API_KEY"] = gemini_api_key
+    
+    if search_provider == "Serper.dev" and serper_api_key:
+        os.environ["SERPER_API_KEY"] = serper_api_key
+    elif search_provider == "LinkUp.so" and linkup_api_key:
+        os.environ["LINKUP_API_KEY"] = linkup_api_key
     
     # Advanced options
     with st.expander("Advanced Options"):
@@ -54,17 +161,27 @@ with st.sidebar:
         
         gemini_model = st.selectbox(
             "Gemini Model",
-            options=["gemini/gemini-2.0-flash", "gemini/gemini-2.0-pro"],
+            options=["gemini/gemini-1.5-flash", "gemini/gemini-1.5-pro"],
             index=0,
             help="Select which Gemini model to use"
         )
+        
+        show_agent_details = st.checkbox(
+            "Show detailed agent interactions",
+            value=True,
+            help="Display detailed input/output for each agent during the research process"
+        )
     
-    # About section
+    # Update About section to include info about no search option
     st.markdown("### About")
     st.markdown("""
     This application uses:
     - **CrewAI**: To orchestrate multiple AI agents
     - **Google Gemini**: For AI language capabilities
+    - **Search Options**: 
+      - No Search Tool (relies on LLM knowledge)
+      - Serper.dev for web search 
+      - LinkUp.so for web search
     - **Streamlit**: For the user interface
     
     No data is stored persistently - all processing happens in your local session.
@@ -92,15 +209,91 @@ with col2:
 
 # Progress indicator and results area
 progress_placeholder = st.empty()
+agent_logs_container = st.container()
 results_container = st.container()
 
-# Function to run research with CrewAI
-def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.5-flash", temp=0.7):
+# Custom Agent Logger for UI display
+class AgentLogger:
+    def __init__(self, container, show_details=True):
+        self.container = container
+        self.show_details = show_details
+        self.agents_data = {}
+        self.expanders = {}
+        
+        # Initialize expanders for each agent
+        if self.show_details:
+            with self.container:
+                st.markdown("## Agent Interactions")
+                self.expanders["Research Specialist"] = st.expander("Research Specialist", expanded=True)
+                self.expanders["Information Analyst"] = st.expander("Information Analyst", expanded=True)
+                self.expanders["Content Writer"] = st.expander("Content Writer", expanded=True)
+    
+    def log_input(self, agent_role, input_text):
+        if not self.show_details:
+            return
+            
+        if agent_role not in self.agents_data:
+            self.agents_data[agent_role] = []
+        
+        self.agents_data[agent_role].append({
+            "type": "input",
+            "content": input_text
+        })
+        
+        self._update_display(agent_role)
+    
+    def log_output(self, agent_role, output_text):
+        if not self.show_details:
+            return
+            
+        if agent_role not in self.agents_data:
+            self.agents_data[agent_role] = []
+        
+        self.agents_data[agent_role].append({
+            "type": "output", 
+            "content": output_text
+        })
+        
+        self._update_display(agent_role)
+    
+    def _update_display(self, agent_role):
+        # Find the appropriate expander
+        expander = None
+        for key, exp in self.expanders.items():
+            if key in agent_role:
+                expander = exp
+                break
+        
+        if not expander:
+            # Default to first expander if no match
+            expander = list(self.expanders.values())[0]
+            
+        # Build the markdown content
+        content = ""
+        for item in self.agents_data[agent_role]:
+            if item["type"] == "input":
+                content += f"### 📥 Input\n```\n{item['content']}\n```\n\n"
+            else:
+                content += f"### 📤 Output\n```\n{item['content']}\n```\n\n"
+        
+        # Update the expander content
+        expander.markdown(content)
+
+# Modify function to support LinkUp and no-tool option
+def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider="No Search Tool (Use LLM Knowledge Only)",
+                        serper_api_key=None, linkup_api_key=None,
+                        model="gemini/gemini-1.5-flash", temp=0.7, show_details=True):
     """
     Run a research task using CrewAI and return the results
     """
-    if not api_key:
+    if not gemini_api_key:
         return "ERROR: Please enter your Gemini API key in the sidebar."
+    
+    if search_provider == "Serper.dev" and not serper_api_key:
+        return "ERROR: Please enter your Serper API key in the sidebar."
+    
+    if search_provider == "LinkUp.so" and not linkup_api_key:
+        return "ERROR: Please enter your LinkUp API key in the sidebar."
     
     if not topic:
         return "ERROR: Please enter a research topic."
@@ -109,12 +302,34 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
         # Set up progress message
         progress_placeholder.info("Initializing research agents...")
         
+        # Initialize agent logger
+        agent_logger = AgentLogger(agent_logs_container, show_details=show_details)
+        
         # Initialize Gemini LLM
         gemini_llm = LLM(
             model=model,
-            api_key=api_key,
+            api_key=gemini_api_key,
             temperature=temp,
         )
+        
+        # Initialize the appropriate search tool based on selection
+        tools = []
+        if search_provider == "Serper.dev":
+            search_tool = SerperDevTool(api_key=serper_api_key)
+            tools = [search_tool]
+            progress_placeholder.info("Initializing Serper.dev search tool...")
+        elif search_provider == "LinkUp.so":
+            # Set the global variable for LinkUp API key
+            global LINKUP_API_KEY
+            LINKUP_API_KEY = linkup_api_key
+            
+            # Create the tool without passing the API key
+            search_tool = LinkUpSearchTool()
+            tools = [search_tool]
+            progress_placeholder.info("Initializing LinkUp.so search tool...")
+        else:
+            # No search tool option
+            progress_placeholder.info("Running without search tools (using LLM knowledge only)...")
         
         # Include focus in the topic if provided
         full_topic = f"{topic}{': ' + focus if focus else ''}"
@@ -126,7 +341,8 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
             goal=f"Research {full_topic} thoroughly and provide comprehensive information",
             backstory="You are an expert researcher with a talent for finding detailed information on any subject.",
             verbose=True,
-            llm=gemini_llm
+            llm=gemini_llm,
+            tools=tools
         )
         
         # Create analyst agent
@@ -136,7 +352,8 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
             goal=f"Analyze research findings on {full_topic} and extract key insights",
             backstory="You are a skilled analyst with expertise in synthesizing information and identifying patterns.",
             verbose=True,
-            llm=gemini_llm
+            llm=gemini_llm,
+            tools=tools
         )
         
         # Create writer agent
@@ -149,17 +366,26 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
             llm=gemini_llm
         )
         
+        # Adjust task descriptions based on whether we're using search tools
+        search_instruction = ""
+        if search_provider not in ["No Search Tool (Use LLM Knowledge Only)"]:
+            search_instruction = "Use the search tool to gather comprehensive information including recent developments, key concepts, historical context, and relevant statistics. Verify information from multiple sources when possible."
+        
         # Create research task
         progress_placeholder.info("Defining research tasks...")
         research_task = Task(
-            description=f"Research the topic: {full_topic}. Focus on gathering comprehensive information including recent developments, key concepts, historical context, and relevant statistics.",
+            description=f"Research the topic: {full_topic}. {search_instruction}",
             agent=researcher,
             expected_output="Detailed research findings with all relevant information and sources."
         )
         
         # Create analysis task
+        verify_instruction = ""
+        if search_provider not in ["No Search Tool (Use LLM Knowledge Only)"]:
+            verify_instruction = "Use the search tool to verify or expand on information as needed."
+            
         analysis_task = Task(
-            description=f"Analyze the research findings on {full_topic}. Identify key trends, patterns, insights, and implications.",
+            description=f"Analyze the research findings on {full_topic}. Identify key trends, patterns, insights, and implications. {verify_instruction}",
             agent=analyst,
             expected_output="In-depth analysis with key insights, trends, and interpretation of the research findings."
         )
@@ -171,13 +397,25 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
             expected_output="A complete, well-structured report on the topic with all key information presented clearly."
         )
         
-        # Create crew
+        # Define callback functions for step and task logging
+        def step_callback(agent, input_text, output):
+            """Called after each step in an agent's execution"""
+            agent_logger.log_input(agent.role, input_text)
+            agent_logger.log_output(agent.role, output)
+            return output
+        
+        def task_callback(output):
+            """Called after each task is completed"""
+            # For task completion we just return the output
+            return output
+        
+        # Create crew with callbacks
         progress_placeholder.info("Assembling AI research crew...")
         crew = Crew(
             agents=[researcher, analyst, writer],
             tasks=[research_task, analysis_task, writing_task],
             verbose=True,
-            process=Process.sequential  # Tasks will be completed in order
+            process=Process.sequential
         )
         
         # Run the crew
@@ -202,77 +440,25 @@ def run_crewai_research(topic, focus=None, api_key=None, model="gemini/gemini-1.
 if start_research:
     if "GEMINI_API_KEY" not in os.environ or not os.environ["GEMINI_API_KEY"]:
         progress_placeholder.error("Please enter your Gemini API key in the sidebar")
+    elif search_provider == "Serper.dev" and ("SERPER_API_KEY" not in os.environ or not os.environ["SERPER_API_KEY"]):
+        progress_placeholder.error("Please enter your Serper API key in the sidebar")
+    elif search_provider == "LinkUp.so" and ("LINKUP_API_KEY" not in os.environ or not os.environ["LINKUP_API_KEY"]):
+        progress_placeholder.error("Please enter your LinkUp API key in the sidebar")
     else:
         with results_container:
             with st.spinner("Running research..."):
                 research_result = run_crewai_research(
                     topic=research_topic,
                     focus=research_focus if research_focus else None,
-                    api_key=os.environ["GEMINI_API_KEY"],
+                    gemini_api_key=os.environ["GEMINI_API_KEY"],
+                    search_provider=search_provider,
+                    serper_api_key=os.environ.get("SERPER_API_KEY", None),
+                    linkup_api_key=os.environ.get("LINKUP_API_KEY", None),
                     model=gemini_model,
-                    temp=temperature
+                    temp=temperature,
+                    show_details=show_agent_details
                 )
                 
                 # Display results
                 st.markdown("## Research Results")
                 st.markdown(research_result)
-                
-                # Convert the result to string for download button
-                result_str = str(research_result)
-                
-                # Add download button for the results
-                st.download_button(
-                    label="Download Results",
-                    data=result_str,
-                    file_name=f"{research_topic.replace(' ', '_')}_research.md",
-                    mime="text/markdown"
-                )
-
-# Instructions
-if not start_research:
-    with results_container:
-        st.info("""
-        ## How to Use This Tool
-        
-        1. Enter your Google Gemini API key in the sidebar (or add it to a .env file)
-        2. Type your research topic in the input field
-        3. Optionally specify aspects to focus on
-        4. Click "Start Research" to begin
-        
-        The system will use three AI agents working together:
-        - **Research Specialist**: Gathers comprehensive information
-        - **Information Analyst**: Identifies key insights and patterns
-        - **Content Writer**: Creates a well-structured final report
-        
-        Research may take several minutes to complete depending on the topic.
-        """)
-
-# Add setup instructions at the bottom
-with st.expander("Local Setup Instructions"):
-    st.markdown("""
-    ### How to Run This App Locally
-    
-    1. **Install required packages**:
-       ```bash
-       pip install streamlit crewai google-generativeai python-dotenv
-       ```
-       
-    2. **Set up your .env file** (optional but recommended):
-       Create a file named `.env` in the same directory as this script with:
-       ```
-       GEMINI_API_KEY=your_api_key_here
-       ```
-       
-    3. **Save this code** as `crew_research_app.py`
-    
-    4. **Run the app**:
-       ```bash
-       streamlit run crew_research_app.py
-       ```
-       
-    5. **Get a Gemini API key**:
-       - Go to [Google AI Studio](https://makersuite.google.com/)
-       - Create an account if you don't have one
-       - Navigate to API keys and create a new key
-       - Copy the key and paste it in the sidebar of this app (or in your .env file)
-    """)
