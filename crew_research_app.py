@@ -1,6 +1,8 @@
 import os
+import sys
 import json
-from typing import Type
+import io
+from typing import Type, Dict, Any, List, Optional, Callable, Union
 import streamlit as st
 from crewai import Agent, Task, Crew, LLM, Process
 from crewai.tools import BaseTool
@@ -10,6 +12,9 @@ from dotenv import load_dotenv
 import traceback
 import warnings
 import requests
+import threading
+import time
+import re
 
 # Suppress Pydantic warnings about callback functions
 warnings.filterwarnings("ignore", message=".*is not a Python type.*")
@@ -224,24 +229,14 @@ class AgentLogger:
         # Initialize expanders for each agent
         if self.show_details:
             with self.container:
-                st.markdown("## Agent Interactions")
+                st.markdown("## Agent Outputs")
                 self.expanders["Research Specialist"] = st.expander("Research Specialist", expanded=True)
                 self.expanders["Information Analyst"] = st.expander("Information Analyst", expanded=True)
                 self.expanders["Content Writer"] = st.expander("Content Writer", expanded=True)
     
     def log_input(self, agent_role, input_text):
-        if not self.show_details:
-            return
-            
-        if agent_role not in self.agents_data:
-            self.agents_data[agent_role] = []
-        
-        self.agents_data[agent_role].append({
-            "type": "input",
-            "content": input_text
-        })
-        
-        self._update_display(agent_role)
+        # Skip logging inputs entirely - we only want to show outputs
+        pass
     
     def log_output(self, agent_role, output_text):
         if not self.show_details:
@@ -251,7 +246,6 @@ class AgentLogger:
             self.agents_data[agent_role] = []
         
         self.agents_data[agent_role].append({
-            "type": "output", 
             "content": output_text
         })
         
@@ -269,16 +263,122 @@ class AgentLogger:
             # Default to first expander if no match
             expander = list(self.expanders.values())[0]
             
-        # Build the markdown content
+        # Build the markdown content - only showing outputs
         content = ""
         for item in self.agents_data[agent_role]:
-            if item["type"] == "input":
-                content += f"### 📥 Input\n```\n{item['content']}\n```\n\n"
-            else:
-                content += f"### 📤 Output\n```\n{item['content']}\n```\n\n"
+            content += f"```\n{item['content']}\n```\n\n"
         
         # Update the expander content
         expander.markdown(content)
+
+# Class for capturing stdout and stderr to display in Streamlit UI
+class OutputCapture:
+    def __init__(self, agent_logger=None):
+        self.terminal_stdout = sys.stdout
+        self.terminal_stderr = sys.stderr
+        self.agent_logger = agent_logger
+        self.buffer = io.StringIO()
+        self.current_agent = None
+        self.seen_messages = set()
+        self.final_answer_pattern = re.compile(r"## Final Answer:\s*(.*)", re.DOTALL)
+        
+        # Agent identification patterns
+        self.patterns = {
+            "research": re.compile(r".*Research Specialist.*", re.IGNORECASE),
+            "analyst": re.compile(r".*Information Analyst.*", re.IGNORECASE),
+            "writer": re.compile(r".*Content Writer.*", re.IGNORECASE)
+        }
+        
+        # Buffer for accumulating output until we see a complete pattern
+        self.accumulating_buffer = ""
+        
+    def write(self, message):
+        # Write to the original terminal
+        self.terminal_stdout.write(message)
+        
+        # Store in buffer
+        self.buffer.write(message)
+        
+        # If no agent_logger or empty message, nothing to do
+        if not self.agent_logger or not message.strip():
+            return
+            
+        # Clean the message (remove ANSI color codes and other terminal artifacts)
+        clean_message = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', message).strip()
+        
+        # Update the accumulating buffer
+        self.accumulating_buffer += clean_message + "\n"
+        
+        # Check if this contains agent identification
+        for agent_type, pattern in self.patterns.items():
+            if pattern.search(message):
+                if agent_type == "research":
+                    self.current_agent = "Research Specialist"
+                elif agent_type == "analyst":
+                    self.current_agent = "Information Analyst"
+                elif agent_type == "writer":
+                    self.current_agent = "Content Writer"
+        
+        # If we have identified an agent
+        if self.current_agent:
+            # Look for final answers - these are the most important outputs
+            answer_match = self.final_answer_pattern.search(self.accumulating_buffer)
+            if answer_match:
+                answer = answer_match.group(0).strip()  # Get the full match with "## Final Answer:"
+                if answer not in self.seen_messages:
+                    self.agent_logger.log_output(self.current_agent, answer)
+                    self.seen_messages.add(answer)
+                    # Clear the buffer after capturing the answer
+                    self.accumulating_buffer = ""
+                    
+            # If buffer gets too large, trim it to avoid memory issues
+            if len(self.accumulating_buffer) > 50000:
+                self.accumulating_buffer = self.accumulating_buffer[-20000:]
+    
+    def flush(self):
+        self.terminal_stdout.flush()
+    
+    def get_output(self):
+        return self.buffer.getvalue()
+    
+    def reset(self):
+        self.buffer = io.StringIO()
+        self.current_agent = None
+        self.seen_messages = set()
+        self.accumulating_buffer = ""
+
+# Define callback functions to monitor agent interactions
+def create_step_callback(agent_logger):
+    """Create a step callback function that logs agent interactions."""
+    
+    def step_callback(formatted_answer):
+        """Callback function that logs agent steps during execution.
+        This function is called by CrewAI with the formatted answer from each agent step.
+        """
+        # Try to determine which agent is responding based on content of the answer
+        agent_role = "Agent"  # Default role
+        
+        # Look for clues in the formatted answer to identify the agent
+        if "research" in formatted_answer.lower() and any(term in formatted_answer.lower() for term in ["found", "searched", "discovered", "information", "sources"]):
+            agent_role = "Research Specialist"
+        elif "analy" in formatted_answer.lower() and any(term in formatted_answer.lower() for term in ["pattern", "trend", "insight", "data", "findings"]):
+            agent_role = "Information Analyst"
+        elif any(term in formatted_answer.lower() for term in ["report", "article", "summary", "write", "written", "document"]):
+            agent_role = "Content Writer"
+        
+        # Log the response from the agent with the determined role
+        agent_logger.log_output(agent_role, formatted_answer[:5000] + ("..." if len(formatted_answer) > 5000 else ""))
+        
+        # After a response, log a placeholder for the next input
+        # This creates a more conversational view in the UI
+        if agent_role == "Research Specialist":
+            next_agent = "Information Analyst"
+            agent_logger.log_input(next_agent, "Analyzing research findings...")
+        elif agent_role == "Information Analyst":
+            next_agent = "Content Writer"
+            agent_logger.log_input(next_agent, "Preparing to write report based on analysis...")
+            
+    return step_callback
 
 # Modify function to support LinkUp and no-tool option
 def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider="No Search Tool (Use LLM Knowledge Only)",
@@ -305,6 +405,17 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
         
         # Initialize agent logger
         agent_logger = AgentLogger(agent_logs_container, show_details=show_details)
+        
+        # Pre-populate the logger with task descriptions to create the narrative flow
+        if show_details:
+            agent_logger.log_input(
+                "Research Specialist", 
+                f"Research task: Thoroughly research the topic '{topic}{': ' + focus if focus else ''}' and provide comprehensive information."
+            )
+        
+        # Initialize output capture to redirect terminal output to UI
+        stdout_capture = OutputCapture(agent_logger=agent_logger if show_details else None)
+        sys.stdout = stdout_capture
         
         # Initialize Gemini LLM
         gemini_llm = LLM(
@@ -335,7 +446,7 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
         # Include focus in the topic if provided
         full_topic = f"{topic}{': ' + focus if focus else ''}"
         
-        # Create researcher agent
+        # Create researcher agent with verbose enabled
         progress_placeholder.info("Creating research specialist agent...")
         researcher = Agent(
             role="Research Specialist",
@@ -346,7 +457,7 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
             tools=tools
         )
         
-        # Create analyst agent
+        # Create analyst agent with verbose enabled
         progress_placeholder.info("Creating information analyst agent...")
         analyst = Agent(
             role="Information Analyst",
@@ -357,7 +468,7 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
             tools=tools
         )
         
-        # Create writer agent
+        # Create writer agent with verbose enabled
         progress_placeholder.info("Creating content writer agent...")
         writer = Agent(
             role="Content Writer",
@@ -400,19 +511,7 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
             context=[analysis_task]
         )
         
-        # Define callback functions for step and task logging
-        def step_callback(agent, input_text, output):
-            """Called after each step in an agent's execution"""
-            agent_logger.log_input(agent.role, input_text)
-            agent_logger.log_output(agent.role, output)
-            return output
-        
-        def task_callback(output):
-            """Called after each task is completed"""
-            # For task completion we just return the output
-            return output
-        
-        # Create crew with callbacks
+        # Create crew
         progress_placeholder.info("Assembling AI research crew...")
         crew = Crew(
             agents=[researcher, analyst, writer],
@@ -426,6 +525,9 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
         result = crew.kickoff()
         progress_placeholder.success("Research completed successfully!")
         
+        # Restore original stdout
+        sys.stdout = stdout_capture.terminal_stdout
+        
         # Extract the content as string from CrewOutput object
         if hasattr(result, 'raw'):
             return result.raw
@@ -434,6 +536,10 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
             return str(result)
         
     except Exception as e:
+        # Make sure to restore stdout in case of error
+        if 'stdout_capture' in locals():
+            sys.stdout = stdout_capture.terminal_stdout
+            
         import traceback
         error_details = traceback.format_exc()
         progress_placeholder.error("Research failed!")
