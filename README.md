@@ -138,7 +138,6 @@ streamlit
 python-dotenv
 google-generativeai
 crewai-tools
-
 ```
 
 ## License
