@@ -3,3 +3,4 @@ streamlit
 python-dotenv
 google-generativeai
 crewai-tools
+pysqlite3-binary

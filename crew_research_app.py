@@ -1,13 +1,14 @@
 import os
 import sys
+import pysqlite3
+sys.modules["sqlite3"] = pysqlite3
 import json
 import io
 from typing import Type, Dict, Any, List, Optional, Callable, Union
 import streamlit as st
 from crewai import Agent, Task, Crew, LLM, Process
 from crewai.tools import BaseTool
-from crewai_tools import SerperDevTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, ConfigDict
 from dotenv import load_dotenv
 import traceback
 import warnings
@@ -33,82 +34,80 @@ st.set_page_config(
 st.title("🔍 AICrew Research Assistant")
 st.markdown("Research any topic using multiple AI agents powered by Gemini")
 
-# LinkUp Search Tool implementation
-class LinkUpSearchInput(BaseModel):
-    """Input schema for LinkUp Search Tool."""
+# Google Search Tool implementation
+class GoogleSearchInput(BaseModel):
+    """Input schema for Google Search Tool."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     query: str = Field(description="The search query to perform")
-    depth: str = Field(default="standard", description="Depth of search: 'standard' or 'deep'")
-    output_type: str = Field(default="searchResults", description="Output type: 'searchResults', 'sourcedAnswer', or 'structured'")
 
-# Global variable to store the LinkUp API key for the current execution only
-LINKUP_API_KEY = ""
+class GoogleSearchTool(BaseTool):
+    name: str = "google_search"
+    description: str = "Search the web for information using Google Custom Search API and return comprehensive results."
+    args_schema: Type[BaseModel] = GoogleSearchInput
+    _api_key: str = PrivateAttr()
+    _cx: str = PrivateAttr()
 
-class LinkUpSearchTool(BaseTool):
-    name: str = "web_search"
-    description: str = "Search the web for information using LinkUp and return comprehensive results"
-    args_schema: Type[BaseModel] = LinkUpSearchInput
+    def __init__(self, api_key: str, cx: str, **kwargs):
+        super().__init__(**kwargs)
+        self._api_key = api_key
+        self._cx = cx
 
-    def _run(self, query: str, depth: str = "standard", output_type: str = "searchResults") -> str:
-        """Execute LinkUp search and return results."""
+    def _run(self, query: str) -> str:
+        """Execute Google Custom Search and return results."""
+        if not self._api_key:
+            return "Error: Google Search API Key is not configured for GoogleSearchTool."
+        if not self._cx:
+            return "Error: Google Custom Search Engine ID (CX) is not configured for GoogleSearchTool."
         try:
-            # Use the global API key
-            api_key = LINKUP_API_KEY
-            
-            # Set up request to LinkUp API
-            base_url = "https://api.linkup.so/v1/search"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
+            url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                "key": self._api_key,
+                "cx": self._cx,
+                "q": query
             }
-            
-            # Prepare the request based on LinkUp's API documentation
-            data = {
-                "q": query,
-                "outputType": output_type,
-                "depth": depth
-            }
-            
-            # Make the API call
-            response = requests.post(
-                base_url, 
-                headers=headers, 
-                json=data
-            )
+            response = requests.get(url, params=params)
+            # print(f"[DEBUG] Google Search API URL: {response.url}")
+            # print(f"[DEBUG] Google Search API status: {response.status_code}")
+            # print(f"[DEBUG] Google Search API response: {response.text}")
             response.raise_for_status()
-            
             results = response.json()
-            
-            # Format the results
-            formatted_text = "Search Results:\n\n"
-            
-            # Extract results based on LinkUp API response format
-            if "results" in results:
-                for i, item in enumerate(results["results"], 1):
-                    name = item.get("name", "No title")
-                    url = item.get("url", "No link")
+
+            formatted_text = "Google Search Results:\n\n"
+            if "items" in results:
+                for i, item in enumerate(results["items"], 1):
+                    name = item.get("title", "No title")
+                    url = item.get("link", "No link")  # fix: should be 'link' not 'url'
                     snippet = item.get("snippet", "No description")
-                    
+
                     formatted_text += f"{i}. {name}\n"
                     formatted_text += f"   URL: {url}\n"
                     formatted_text += f"   Description: {snippet}\n\n"
             else:
-                # Handle alternative response structure
-                formatted_text += "Results structure not recognized. Raw data:\n"
-                formatted_text += json.dumps(results, indent=2)
-                
+                formatted_text += "No results found or error in response structure.\n"
+                formatted_text += f"Raw response: {json.dumps(results, indent=2)}\n"
+
             return formatted_text
-            
+
+        except requests.exceptions.HTTPError as http_err:
+            error_content = "Unknown error"
+            try:
+                error_content = response.json() # type: ignore
+            except json.JSONDecodeError:
+                error_content = response.text # type: ignore
+            print(f"[ERROR] Google Search HTTPError: {str(http_err)} Response: {error_content}")
+            return f"Error searching with Google Search (HTTP {response.status_code}): {str(http_err)}\nResponse: {error_content}"
         except Exception as e:
-            return f"Error searching with LinkUp: {str(e)}"
+            print(f"[ERROR] Google Search Exception: {str(e)}")
+            return f"Error searching with Google Search: {str(e)}"
 
 # Initialize session state for API keys if they don't exist
 # On first load, try to get values from environment variables
 if "gemini_api_key" not in st.session_state:
     st.session_state.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-if "serper_api_key" not in st.session_state:
-    st.session_state.serper_api_key = os.environ.get("SERPER_API_KEY", "")
-if "linkup_api_key" not in st.session_state:
-    st.session_state.linkup_api_key = os.environ.get("LINKUP_API_KEY", "")
+if "google_search_api_key" not in st.session_state: # New state for Google Search API key
+    st.session_state.google_search_api_key = os.environ.get("GOOGLE_SEARCH_API_KEY", "")
+if "google_search_cx" not in st.session_state:
+    st.session_state.google_search_cx = os.environ.get("GOOGLE_SEARCH_CX", "")
 
 # Sidebar for API key input
 with st.sidebar:
@@ -117,43 +116,39 @@ with st.sidebar:
     # Add search provider selection
     search_provider = st.selectbox(
         "Search Provider",
-        options=["No Search Tool (Use LLM Knowledge Only)", "Serper.dev", "LinkUp.so"],
+        options=["No Search Tool (Use LLM Knowledge Only)", "Google Search"],
         index=0,
         help="Select which search API to use for research, or use no search tool"
     )
-    
+
     # API key inputs using session state
-    gemini_api_key = st.text_input(
-        "Google API Key", 
+    gemini_api_key_input = st.text_input( # Renamed variable to avoid conflict
+        "Gemini API Key",
         value=st.session_state.gemini_api_key,
         type="password",
         help="Enter your Gemini API key from Google AI Studio"
     )
     # Store in session state (not in environment variables)
-    st.session_state.gemini_api_key = gemini_api_key
-    
+    st.session_state.gemini_api_key = gemini_api_key_input
+
     # Show the appropriate API key input based on selection
-    if search_provider == "Serper.dev":
-        serper_api_key = st.text_input(
-            "Serper API Key", 
-            value=st.session_state.serper_api_key,
+    if search_provider == "Google Search":
+        google_search_api_key_input = st.text_input( # New input for Google Search API Key
+            "Google Search API Key",
+            value=st.session_state.google_search_api_key,
             type="password",
-            help="Enter your Serper.dev API key for web search capabilities"
+            help="Enter your Google Cloud API key enabled for Custom Search API"
         )
-        # Store in session state (not in environment variables)
-        st.session_state.serper_api_key = serper_api_key
-    elif search_provider == "LinkUp.so":
-        linkup_api_key = st.text_input(
-            "LinkUp API Key", 
-            value=st.session_state.linkup_api_key,
+        st.session_state.google_search_api_key = google_search_api_key_input
+
+        google_search_cx_input = st.text_input( # Renamed variable
+            "Google Custom Search Engine ID (CX)",
+            value=st.session_state.google_search_cx,
             type="password",
-            help="Enter your LinkUp.so API key for web search capabilities"
+            help="Enter your Google Custom Search Engine ID (CX)"
         )
-        # Store in session state (not in environment variables)
-        st.session_state.linkup_api_key = linkup_api_key
-        # Set the global variable for current execution only
-        LINKUP_API_KEY = linkup_api_key
-    
+        st.session_state.google_search_cx = google_search_cx_input
+
     # Advanced options
     with st.expander("Advanced Options"):
         temperature = st.slider(
@@ -164,32 +159,31 @@ with st.sidebar:
             step=0.1,
             help="Higher values make output more creative, lower values more deterministic"
         )
-        
+
         gemini_model = st.selectbox(
             "Gemini Model",
-            options=["gemini/gemini-1.5-flash", "gemini/gemini-1.5-pro"],
+            options=["gemini/gemini-1.5-flash", "gemini/gemini-2.0-flash"],
             index=0,
             help="Select which Gemini model to use"
         )
         
         show_agent_details = st.checkbox(
             "Show detailed agent interactions",
-            value=True,
+            value=False, 
             help="Display detailed input/output for each agent during the research process"
         )
-    
+
     # Update About section to include info about no search option
     st.markdown("### About")
     st.markdown("""
     This application uses:
     - **CrewAI**: To orchestrate multiple AI agents
     - **Google Gemini**: For AI language capabilities
-    - **Search Options**: 
+    - **Search Options**:
       - No Search Tool (relies on LLM knowledge)
-      - Serper.dev for web search 
-      - LinkUp.so for web search
+      - Google Search for web search (requires Google Search API Key and CX ID)
     - **Streamlit**: For the user interface
-    
+
     No data is stored persistently - all processing happens in your local session.
     """)
 
@@ -381,21 +375,19 @@ def create_step_callback(agent_logger):
     return step_callback
 
 # Modify function to support LinkUp and no-tool option
-def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider="No Search Tool (Use LLM Knowledge Only)",
-                        serper_api_key=None, linkup_api_key=None,
-                        model="gemini/gemini-1.5-flash", temp=0.7, show_details=True):
+def run_crewai_research(topic, focus=None, gemini_api_key=None,
+                        google_search_api_key=None, google_search_cx=None, 
+                        search_provider="No Search Tool (Use LLM Knowledge Only)",
+                        model="gemini/gemini-1.5-flash", temp=0.7, show_details=False):
     """
     Run a research task using CrewAI and return the results
     """
     if not gemini_api_key:
         return "ERROR: Please enter your Gemini API key in the sidebar."
     
-    if search_provider == "Serper.dev" and not serper_api_key:
-        return "ERROR: Please enter your Serper API key in the sidebar."
-    
-    if search_provider == "LinkUp.so" and not linkup_api_key:
-        return "ERROR: Please enter your LinkUp API key in the sidebar."
-    
+    if search_provider == "Google Search" and (not google_search_api_key or not google_search_cx):
+        return "ERROR: Please enter your Google Search API Key and Custom Search Engine ID (CX) in the sidebar for Google Search."
+
     if not topic:
         return "ERROR: Please enter a research topic."
     
@@ -426,19 +418,10 @@ def run_crewai_research(topic, focus=None, gemini_api_key=None, search_provider=
         
         # Initialize the appropriate search tool based on selection
         tools = []
-        if search_provider == "Serper.dev":
-            search_tool = SerperDevTool(api_key=serper_api_key)
+        if search_provider == "Google Search":
+            search_tool = GoogleSearchTool(api_key=google_search_api_key, cx=google_search_cx)
             tools = [search_tool]
-            progress_placeholder.info("Initializing Serper.dev search tool...")
-        elif search_provider == "LinkUp.so":
-            # Set the global variable for LinkUp API key
-            global LINKUP_API_KEY
-            LINKUP_API_KEY = linkup_api_key
-            
-            # Create the tool without passing the API key
-            search_tool = LinkUpSearchTool()
-            tools = [search_tool]
-            progress_placeholder.info("Initializing LinkUp.so search tool...")
+            progress_placeholder.info("Initializing Google Search tool...")
         else:
             # No search tool option
             progress_placeholder.info("Running without search tools (using LLM knowledge only)...")
@@ -550,10 +533,27 @@ if start_research:
     # Check for API keys in session state, NOT in environment variables
     if not st.session_state.gemini_api_key:
         progress_placeholder.error("Please enter your Gemini API key in the sidebar")
-    elif search_provider == "Serper.dev" and not st.session_state.serper_api_key:
-        progress_placeholder.error("Please enter your Serper API key in the sidebar")
-    elif search_provider == "LinkUp.so" and not st.session_state.linkup_api_key:
-        progress_placeholder.error("Please enter your LinkUp API key in the sidebar")
+    elif search_provider == "Google Search":
+        if not st.session_state.google_search_api_key:
+            progress_placeholder.error("Please enter your Google Search API Key in the sidebar")
+        elif not st.session_state.google_search_cx:
+            progress_placeholder.error("Please enter your Google Custom Search Engine ID (CX) in the sidebar")
+        else:
+            with results_container:
+                with st.spinner("Running research..."):
+                    research_result = run_crewai_research(
+                        topic=research_topic,
+                        focus=research_focus if research_focus else None,
+                        gemini_api_key=st.session_state.gemini_api_key,
+                        search_provider=search_provider,
+                        google_search_api_key=st.session_state.google_search_api_key if search_provider == "Google Search" else None,
+                        google_search_cx=st.session_state.google_search_cx if search_provider == "Google Search" else None,
+                        model=gemini_model,
+                        temp=temperature,
+                        show_details=show_agent_details
+                    )
+                    st.markdown("## Research Results")
+                    st.markdown(research_result if research_result else ':red[No results or an error occurred. Please check your API keys and try again.]')
     else:
         with results_container:
             with st.spinner("Running research..."):
@@ -562,13 +562,11 @@ if start_research:
                     focus=research_focus if research_focus else None,
                     gemini_api_key=st.session_state.gemini_api_key,
                     search_provider=search_provider,
-                    serper_api_key=st.session_state.serper_api_key,
-                    linkup_api_key=st.session_state.linkup_api_key,
+                    google_search_api_key=st.session_state.google_search_api_key if search_provider == "Google Search" else None,
+                    google_search_cx=st.session_state.google_search_cx if search_provider == "Google Search" else None,
                     model=gemini_model,
                     temp=temperature,
                     show_details=show_agent_details
                 )
-                
-                # Display results
                 st.markdown("## Research Results")
-                st.markdown(research_result)
+                st.markdown(research_result if research_result else ':red[No results or an error occurred. Please check your API keys and try again.]')

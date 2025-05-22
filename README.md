@@ -7,8 +7,7 @@ A powerful multi-agent AI research tool built with CrewAI and Streamlit that lev
 - **Multi-Agent Research**: Employs a team of specialized AI agents (Researcher, Analyst, and Writer) working collaboratively
 - **Multiple Search Providers**:
   - **No Search Tool**: Rely solely on Gemini's built-in knowledge
-  - **Serper.dev**: Integrate with Serper.dev for comprehensive web search capabilities
-  - **LinkUp.so**: Leverage LinkUp.so for deep search results
+  - **Google Search**: Integrate with Google Search for comprehensive web search capabilities
 - **Interactive UI**: User-friendly Streamlit interface with detailed logging of agent activities
 - **Customizable Research**: Optional focus areas for targeted research
 - **Advanced LLM Options**: Control temperature and model selection
@@ -57,19 +56,17 @@ The application requires API keys for the following services:
 1. **Google Gemini API Key**: Required for all modes
    - Get your API key from [Google AI Studio](https://ai.google.dev/)
 
-2. **Serper.dev API Key**: Only required if using Serper.dev search
-   - Sign up at [Serper.dev](https://serper.dev/) to get an API key
-
-3. **LinkUp.so API Key**: Only required if using LinkUp.so search
-   - Sign up at [LinkUp.so](https://linkup.so/) to get an API key
+2. **Google Search API Key and Custom Search Engine ID (CX)**: Only required if using Google Search
+   - Get your API key from your Google Cloud Console (enable the Custom Search API)
+   - Set up a Custom Search Engine and obtain the CX ID
 
 You can provide these keys directly in the app UI or set them as environment variables:
 
 ```bash
 # Add to your .env file
 GEMINI_API_KEY=your_gemini_api_key
-SERPER_API_KEY=your_serper_api_key
-LINKUP_API_KEY=your_linkup_api_key
+GOOGLE_SEARCH_API_KEY=your_google_search_api_key
+GOOGLE_SEARCH_CX=your_google_search_cx
 ```
 
 ## Usage
@@ -100,26 +97,26 @@ This will start the application and open it in your default web browser.
 - Best for general knowledge topics or where up-to-date information isn't critical
 - No additional API keys required
 
-### Serper.dev
+### Google Search Integration
 
-- Provides comprehensive web search capabilities
-- Access to recent information
-- Good all-purpose search option
-- Requires Serper.dev API key
+You can now use Google Search as a research tool in addition to Gemini's LLM knowledge. To enable Google Search:
 
-### LinkUp.so
+1. Select **Google Search** as the Search Provider in the sidebar.
+2. Enter your **Google Search API Key** and **Google Custom Search Engine ID (CX)** in the sidebar fields.
+   - You can obtain these from your Google Cloud Console and Custom Search Engine setup.
+3. If you do not enter these, only the LLM's built-in knowledge will be used.
+4. When enabled, the app will use Google Search results to enhance research quality and freshness.
 
-- Specialized search with deep result capabilities
-- Option to control depth of search and output formatting
-- More detailed search results
-- Requires LinkUp.so API key
+**Note:**
+- No data is stored persistently; all processing happens in your local session.
+- If you see errors, double-check your API key and CX values.
 
 ## Advanced Configuration
 
 In the "Advanced Options" section of the sidebar, you can:
 
 - Adjust temperature (0.0-1.0): Lower values make responses more deterministic, higher values more creative
-- Select Gemini model: Choose between Gemini 1.5 Flash (faster) or Gemini 1.5 Pro (more capable)
+- Select Gemini model: Choose between Gemini 2.0 Flash (faster) or Gemini 1.5 Flash (more capable)
 - Enable/disable detailed agent interactions
 
 ## How It Works
@@ -149,6 +146,6 @@ crewai-tools
 - [CrewAI](https://github.com/joaomdmoura/crewAI) for the multi-agent framework
 - [Streamlit](https://streamlit.io/) for the web interface
 - [Google Gemini](https://ai.google.dev/) for the AI language models
-- [Serper.dev](https://serper.dev/) and [LinkUp.so](https://linkup.so/) for search APIs
+- [Google Custom Search](https://programmablesearchengine.google.com/) for search API
 
 ---
