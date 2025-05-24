@@ -1,4 +1,4 @@
-# AICrew Research Assistant
+# AICrew Research Agent
 
 A powerful multi-agent AI research tool built with CrewAI and Streamlit that leverages Gemini AI models to perform comprehensive research on any topic through coordinated AI agents.
 
@@ -133,8 +133,9 @@ The agents work sequentially, each building upon the work of the previous agent.
 crewai
 streamlit
 python-dotenv
-google-generativeai
-crewai-tools
+requests
+pysqlite3-binary
+
 ```
 
 ## License
