@@ -1,572 +1,791 @@
+"""
+AICrew Research Agent Application
+
+A Streamlit application that uses CrewAI to orchestrate multiple AI agents
+for comprehensive research tasks. Supports various search providers and
+provides real-time agent interaction monitoring.
+
+"""
+
 import os
 import sys
-import pysqlite3
-sys.modules["sqlite3"] = pysqlite3
 import json
 import io
-from typing import Type, Dict, Any, List, Optional, Callable, Union
+import re
+from typing import Dict, Any, List, Optional, Type, Union
+from dataclasses import dataclass
+from enum import Enum
+
+try:
+    import pysqlite3
+    sys.modules["sqlite3"] = pysqlite3
+except ImportError:
+    pass  
+
 import streamlit as st
+import requests
 from crewai import Agent, Task, Crew, LLM, Process
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr, ConfigDict
 from dotenv import load_dotenv
-import traceback
 import warnings
-import requests
-import threading
-import time
-import re
 
-# Suppress Pydantic warnings about callback functions
-warnings.filterwarnings("ignore", message=".*is not a Python type.*")
-
-# Load environment variables from .env file (for local development)
+# Load environment variables
 load_dotenv()
 
-# Set page config
-st.set_page_config(
-    page_title="AICrew Research Assistant",
-    page_icon="🔍",
-    layout="wide"
-)
+class SearchProvider(Enum):
+    """Enumeration of available search providers."""
+    NO_SEARCH = "No Search Tool (Use LLM Knowledge Only)"
+    GOOGLE_SEARCH = "Google Search"
 
-# App title and description
-st.title("🔍 AICrew Research Assistant")
-st.markdown("Research any topic using multiple AI agents powered by Gemini")
 
-# Google Search Tool implementation
+class ModelConfig(Enum):
+    """Available Gemini models."""
+    GEMINI_1_5_FLASH = "gemini/gemini-1.5-flash"
+    GEMINI_2_0_FLASH = "gemini/gemini-2.0-flash"
+
+
+@dataclass
+class AppConfig:
+    """Application configuration container."""
+    gemini_api_key: str = ""
+    google_search_api_key: str = ""
+    google_search_cx: str = ""
+    search_provider: SearchProvider = SearchProvider.NO_SEARCH
+    temperature: float = 0.7
+    model: ModelConfig = ModelConfig.GEMINI_1_5_FLASH
+    show_agent_details: bool = False
+    
+    def is_valid_for_research(self) -> tuple[bool, str]:
+        """
+        Validate configuration for research execution.
+        
+        Returns:
+            tuple: (is_valid, error_message)
+        """
+        if not self.gemini_api_key:
+            return False, "Gemini API key is required"
+        
+        if self.search_provider == SearchProvider.GOOGLE_SEARCH:
+            if not self.google_search_api_key:
+                return False, "Google Search API key is required for Google Search"
+            if not self.google_search_cx:
+                return False, "Google Custom Search Engine ID (CX) is required"
+        
+        return True, ""
+
+
 class GoogleSearchInput(BaseModel):
     """Input schema for Google Search Tool."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     query: str = Field(description="The search query to perform")
 
+
 class GoogleSearchTool(BaseTool):
+    """
+    Google Custom Search API tool for CrewAI agents.
+    
+    Provides web search capabilities using Google's Custom Search API
+    with comprehensive error handling and response formatting.
+    """
     name: str = "google_search"
-    description: str = "Search the web for information using Google Custom Search API and return comprehensive results."
+    description: str = (
+        "Search the web for information using Google Custom Search API. "
+        "Returns comprehensive results with titles, URLs, and descriptions."
+    )
     args_schema: Type[BaseModel] = GoogleSearchInput
     _api_key: str = PrivateAttr()
     _cx: str = PrivateAttr()
 
     def __init__(self, api_key: str, cx: str, **kwargs):
+        """
+        Initialize Google Search Tool.
+        
+        Args:
+            api_key: Google Cloud API key with Custom Search API enabled
+            cx: Google Custom Search Engine ID
+        """
         super().__init__(**kwargs)
         self._api_key = api_key
         self._cx = cx
 
     def _run(self, query: str) -> str:
-        """Execute Google Custom Search and return results."""
+        """
+        Execute Google Custom Search and return formatted results.
+        
+        Args:
+            query: Search query string
+            
+        Returns:
+            Formatted search results or error message
+        """
         if not self._api_key:
-            return "Error: Google Search API Key is not configured for GoogleSearchTool."
+            return "Error: Google Search API Key is not configured."
         if not self._cx:
-            return "Error: Google Custom Search Engine ID (CX) is not configured for GoogleSearchTool."
+            return "Error: Google Custom Search Engine ID (CX) is not configured."
+        
+        response: Optional[requests.Response] = None
         try:
-            url = "https://www.googleapis.com/customsearch/v1"
-            params = {
-                "key": self._api_key,
-                "cx": self._cx,
-                "q": query
-            }
-            response = requests.get(url, params=params)
-            # print(f"[DEBUG] Google Search API URL: {response.url}")
-            # print(f"[DEBUG] Google Search API status: {response.status_code}")
-            # print(f"[DEBUG] Google Search API response: {response.text}")
-            response.raise_for_status()
-            results = response.json()
+            response = self._make_search_request(query)
+            return self._format_search_results(response.json())
+            
+        except requests.exceptions.HTTPError as e:
+            return self._handle_http_error(e, response)
+        except requests.exceptions.RequestException as e:
+            return f"Network error during search: {str(e)}"
+        except Exception as e:
+            return f"Unexpected error during search: {str(e)}"
 
-            formatted_text = "Google Search Results:\n\n"
-            if "items" in results:
-                for i, item in enumerate(results["items"], 1):
-                    name = item.get("title", "No title")
-                    url = item.get("link", "No link")  # fix: should be 'link' not 'url'
-                    snippet = item.get("snippet", "No description")
+    def _make_search_request(self, query: str) -> requests.Response:
+        """Make HTTP request to Google Custom Search API."""
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            "key": self._api_key,
+            "cx": self._cx,
+            "q": query
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response
 
-                    formatted_text += f"{i}. {name}\n"
-                    formatted_text += f"   URL: {url}\n"
-                    formatted_text += f"   Description: {snippet}\n\n"
-            else:
-                formatted_text += "No results found or error in response structure.\n"
-                formatted_text += f"Raw response: {json.dumps(results, indent=2)}\n"
-
+    def _format_search_results(self, results: Dict[str, Any]) -> str:
+        """Format search results into readable text."""
+        formatted_text = "Google Search Results:\n\n"
+        
+        if "items" not in results:
+            formatted_text += "No results found.\n"
+            if "error" in results:
+                formatted_text += f"API Error: {results['error'].get('message', 'Unknown error')}\n"
             return formatted_text
 
-        except requests.exceptions.HTTPError as http_err:
-            error_content = "Unknown error"
-            try:
-                error_content = response.json() # type: ignore
-            except json.JSONDecodeError:
-                error_content = response.text # type: ignore
-            print(f"[ERROR] Google Search HTTPError: {str(http_err)} Response: {error_content}")
-            return f"Error searching with Google Search (HTTP {response.status_code}): {str(http_err)}\nResponse: {error_content}"
-        except Exception as e:
-            print(f"[ERROR] Google Search Exception: {str(e)}")
-            return f"Error searching with Google Search: {str(e)}"
+        for i, item in enumerate(results["items"], 1):
+            title = item.get("title", "No title")
+            link = item.get("link", "No link")
+            snippet = item.get("snippet", "No description")
 
-# Initialize session state for API keys if they don't exist
-# On first load, try to get values from environment variables
-if "gemini_api_key" not in st.session_state:
-    st.session_state.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-if "google_search_api_key" not in st.session_state: # New state for Google Search API key
-    st.session_state.google_search_api_key = os.environ.get("GOOGLE_SEARCH_API_KEY", "")
-if "google_search_cx" not in st.session_state:
-    st.session_state.google_search_cx = os.environ.get("GOOGLE_SEARCH_CX", "")
+            formatted_text += f"{i}. {title}\n"
+            formatted_text += f"   URL: {link}\n"
+            formatted_text += f"   Description: {snippet}\n\n"
 
-# Sidebar for API key input
-with st.sidebar:
-    st.header("Configuration")
-    
-    # Add search provider selection
-    search_provider = st.selectbox(
-        "Search Provider",
-        options=["No Search Tool (Use LLM Knowledge Only)", "Google Search"],
-        index=0,
-        help="Select which search API to use for research, or use no search tool"
-    )
+        return formatted_text
 
-    # API key inputs using session state
-    gemini_api_key_input = st.text_input( # Renamed variable to avoid conflict
-        "Gemini API Key",
-        value=st.session_state.gemini_api_key,
-        type="password",
-        help="Enter your Gemini API key from Google AI Studio"
-    )
-    # Store in session state (not in environment variables)
-    st.session_state.gemini_api_key = gemini_api_key_input
-
-    # Show the appropriate API key input based on selection
-    if search_provider == "Google Search":
-        google_search_api_key_input = st.text_input( # New input for Google Search API Key
-            "Google Search API Key",
-            value=st.session_state.google_search_api_key,
-            type="password",
-            help="Enter your Google Cloud API key enabled for Custom Search API"
-        )
-        st.session_state.google_search_api_key = google_search_api_key_input
-
-        google_search_cx_input = st.text_input( # Renamed variable
-            "Google Custom Search Engine ID (CX)",
-            value=st.session_state.google_search_cx,
-            type="password",
-            help="Enter your Google Custom Search Engine ID (CX)"
-        )
-        st.session_state.google_search_cx = google_search_cx_input
-
-    # Advanced options
-    with st.expander("Advanced Options"):
-        temperature = st.slider(
-            "Temperature", 
-            min_value=0.0, 
-            max_value=1.0, 
-            value=0.7, 
-            step=0.1,
-            help="Higher values make output more creative, lower values more deterministic"
-        )
-
-        gemini_model = st.selectbox(
-            "Gemini Model",
-            options=["gemini/gemini-1.5-flash", "gemini/gemini-2.0-flash"],
-            index=0,
-            help="Select which Gemini model to use"
-        )
+    def _handle_http_error(self, error: requests.exceptions.HTTPError, response: Optional[requests.Response]) -> str:
+        """Handle HTTP errors with detailed error messages."""
+        if response is None:
+            return f"HTTP Error: {str(error)} (No response available)"
+            
+        try:
+            error_content = response.json()
+            error_message = error_content.get("error", {}).get("message", "Unknown error")
+        except (json.JSONDecodeError, AttributeError):
+            error_message = response.text
         
-        show_agent_details = st.checkbox(
-            "Show detailed agent interactions",
-            value=False, 
-            help="Display detailed input/output for each agent during the research process"
-        )
+        return f"Google Search API Error (HTTP {response.status_code}): {error_message}"
 
-    # Update About section to include info about no search option
-    st.markdown("### About")
-    st.markdown("""
-    This application uses:
-    - **CrewAI**: To orchestrate multiple AI agents
-    - **Google Gemini**: For AI language capabilities
-    - **Search Options**:
-      - No Search Tool (relies on LLM knowledge)
-      - Google Search for web search (requires Google Search API Key and CX ID)
-    - **Streamlit**: For the user interface
 
-    No data is stored persistently - all processing happens in your local session.
-    """)
-
-# Main content area
-research_topic = st.text_input(
-    "Research Topic",
-    placeholder="Enter a topic to research (e.g., Quantum Computing, Climate Change)",
-    help="Be specific for better results"
-)
-
-# Optional research focus
-with st.expander("Research Focus (Optional)"):
-    research_focus = st.text_area(
-        "Specific aspects to focus on",
-        placeholder="Enter any specific aspects you want the research to focus on...",
-        help="Leave blank for a general overview"
-    )
-
-# Research button
-col1, col2, col3 = st.columns([1, 1, 1])
-with col2:
-    start_research = st.button("Start Research", type="primary", use_container_width=True)
-
-# Progress indicator and results area
-progress_placeholder = st.empty()
-agent_logs_container = st.container()
-results_container = st.container()
-
-# Custom Agent Logger for UI display
 class AgentLogger:
-    def __init__(self, container, show_details=True):
+    """
+    Manages logging and display of agent interactions in Streamlit UI.
+    
+    Provides real-time updates of agent outputs with organized display
+    using expandable sections for each agent type.
+    """
+    
+    def __init__(self, container: Any, show_details: bool = True): 
+        """
+        Initialize agent logger.
+        
+        Args:
+            container: Streamlit container for displaying logs
+            show_details: Whether to show detailed agent interactions
+        """
         self.container = container
         self.show_details = show_details
-        self.agents_data = {}
-        self.expanders = {}
+        self.agents_data: Dict[str, List[Dict[str, str]]] = {}
+        self.expanders: Dict[str, Any] = {} 
         
-        # Initialize expanders for each agent
         if self.show_details:
-            with self.container:
-                st.markdown("## Agent Outputs")
-                self.expanders["Research Specialist"] = st.expander("Research Specialist", expanded=True)
-                self.expanders["Information Analyst"] = st.expander("Information Analyst", expanded=True)
-                self.expanders["Content Writer"] = st.expander("Content Writer", expanded=True)
+            self._initialize_ui()
     
-    def log_input(self, agent_role, input_text):
-        # Skip logging inputs entirely - we only want to show outputs
-        pass
+    def _initialize_ui(self):
+        """Initialize Streamlit UI components for agent logging."""
+        with self.container:
+            st.markdown("## Agent Outputs")
+            agent_types = ["Research Specialist", "Information Analyst", "Content Writer"]
+            
+            for agent_type in agent_types:
+                self.expanders[agent_type] = st.expander(
+                    agent_type, 
+                    expanded=(agent_type == "Research Specialist")
+                )
     
-    def log_output(self, agent_role, output_text):
-        if not self.show_details:
+    def log_output(self, agent_role: str, output_text: str):
+        """
+        Log agent output and update UI display.
+        
+        Args:
+            agent_role: Role/type of the agent
+            output_text: Output text from the agent
+        """
+        if not self.show_details or len(output_text.strip()) == 0:
             return
             
+        # Initialize agent data if not exists
         if agent_role not in self.agents_data:
             self.agents_data[agent_role] = []
         
-        self.agents_data[agent_role].append({
-            "content": output_text
-        })
-        
+        # Add new output
+        self.agents_data[agent_role].append({"content": output_text})
         self._update_display(agent_role)
     
-    def _update_display(self, agent_role):
-        # Find the appropriate expander
-        expander = None
-        for key, exp in self.expanders.items():
-            if key in agent_role:
-                expander = exp
-                break
-        
+    def _update_display(self, agent_role: str):
+        """Update the display for a specific agent."""
+        expander = self._find_expander(agent_role)
         if not expander:
-            # Default to first expander if no match
-            expander = list(self.expanders.values())[0]
-            
-        # Build the markdown content - only showing outputs
+            return
+        
+        # Build markdown content from all outputs
         content = ""
         for item in self.agents_data[agent_role]:
             content += f"```\n{item['content']}\n```\n\n"
         
-        # Update the expander content
         expander.markdown(content)
+    
+    def _find_expander(self, agent_role: str) -> Optional[Any]:
+        """Find the appropriate expander for an agent role."""
+        for key, expander in self.expanders.items():
+            if key.lower() in agent_role.lower():
+                return expander
+        return None
 
-# Class for capturing stdout and stderr to display in Streamlit UI
+
 class OutputCapture:
-    def __init__(self, agent_logger=None):
+    """
+    Captures and processes stdout/stderr for agent interaction monitoring.
+    
+    Redirects system output to extract meaningful agent communications
+    and displays them in the Streamlit interface.
+    """
+    
+    def __init__(self, agent_logger: Optional[AgentLogger] = None):
+        """
+        Initialize output capture.
+        
+        Args:
+            agent_logger: Optional logger for displaying captured output
+        """
         self.terminal_stdout = sys.stdout
         self.terminal_stderr = sys.stderr
         self.agent_logger = agent_logger
         self.buffer = io.StringIO()
-        self.current_agent = None
-        self.seen_messages = set()
-        self.final_answer_pattern = re.compile(r"## Final Answer:\s*(.*)", re.DOTALL)
+        self.current_agent: Optional[str] = None
+        self.seen_messages: set = set()
+        self.accumulating_buffer = ""
         
-        # Agent identification patterns
-        self.patterns = {
+        # Patterns for identifying agent types and extracting answers
+        self.agent_patterns = {
             "research": re.compile(r".*Research Specialist.*", re.IGNORECASE),
             "analyst": re.compile(r".*Information Analyst.*", re.IGNORECASE),
             "writer": re.compile(r".*Content Writer.*", re.IGNORECASE)
         }
+        self.final_answer_pattern = re.compile(r"## Final Answer:\s*(.*)", re.DOTALL)
         
-        # Buffer for accumulating output until we see a complete pattern
-        self.accumulating_buffer = ""
+    def write(self, message: str):
+        """
+        Process and capture output messages.
         
-    def write(self, message):
-        # Write to the original terminal
+        Args:
+            message: Output message to process
+        """
+        # Always write to terminal
         self.terminal_stdout.write(message)
-        
-        # Store in buffer
         self.buffer.write(message)
         
-        # If no agent_logger or empty message, nothing to do
         if not self.agent_logger or not message.strip():
             return
             
-        # Clean the message (remove ANSI color codes and other terminal artifacts)
-        clean_message = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', message).strip()
-        
-        # Update the accumulating buffer
+        # Clean message and update buffer
+        clean_message = self._clean_message(message)
         self.accumulating_buffer += clean_message + "\n"
         
-        # Check if this contains agent identification
-        for agent_type, pattern in self.patterns.items():
-            if pattern.search(message):
-                if agent_type == "research":
-                    self.current_agent = "Research Specialist"
-                elif agent_type == "analyst":
-                    self.current_agent = "Information Analyst"
-                elif agent_type == "writer":
-                    self.current_agent = "Content Writer"
+        # Update current agent if pattern matches
+        self._update_current_agent(message)
         
-        # If we have identified an agent
+        # Extract and log final answers
         if self.current_agent:
-            # Look for final answers - these are the most important outputs
-            answer_match = self.final_answer_pattern.search(self.accumulating_buffer)
-            if answer_match:
-                answer = answer_match.group(0).strip()  # Get the full match with "## Final Answer:"
-                if answer not in self.seen_messages:
-                    self.agent_logger.log_output(self.current_agent, answer)
-                    self.seen_messages.add(answer)
-                    # Clear the buffer after capturing the answer
-                    self.accumulating_buffer = ""
-                    
-            # If buffer gets too large, trim it to avoid memory issues
-            if len(self.accumulating_buffer) > 50000:
-                self.accumulating_buffer = self.accumulating_buffer[-20000:]
+            self._extract_and_log_answer()
+            
+        # Prevent buffer from growing too large
+        self._trim_buffer_if_needed()
+    
+    def _clean_message(self, message: str) -> str:
+        """Remove ANSI color codes and terminal artifacts."""
+        return re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', message).strip()
+    
+    def _update_current_agent(self, message: str):
+        """Update current agent based on message patterns."""
+        for agent_type, pattern in self.agent_patterns.items():
+            if pattern.search(message):
+                agent_mapping = {
+                    "research": "Research Specialist",
+                    "analyst": "Information Analyst", 
+                    "writer": "Content Writer"
+                }
+                self.current_agent = agent_mapping[agent_type]
+                break
+    
+    def _extract_and_log_answer(self):
+        """Extract final answers and log them."""
+        # Check if agent_logger and current_agent are not None before calling
+        if self.agent_logger is None or self.current_agent is None:
+            return
+            
+        answer_match = self.final_answer_pattern.search(self.accumulating_buffer)
+        if answer_match:
+            answer = answer_match.group(0).strip()
+            if answer not in self.seen_messages:
+                self.agent_logger.log_output(self.current_agent, answer)
+                self.seen_messages.add(answer)
+                self.accumulating_buffer = ""
+    
+    def _trim_buffer_if_needed(self):
+        """Trim buffer to prevent memory issues."""
+        if len(self.accumulating_buffer) > 50000:
+            self.accumulating_buffer = self.accumulating_buffer[-20000:]
     
     def flush(self):
+        """Flush output buffer."""
         self.terminal_stdout.flush()
     
-    def get_output(self):
+    def get_output(self) -> str:
+        """Get captured output."""
         return self.buffer.getvalue()
     
     def reset(self):
+        """Reset capture state."""
         self.buffer = io.StringIO()
         self.current_agent = None
         self.seen_messages = set()
         self.accumulating_buffer = ""
 
-# Define callback functions to monitor agent interactions
-def create_step_callback(agent_logger):
-    """Create a step callback function that logs agent interactions."""
+
+class ResearchEngine:
+    """
+    Core research engine that orchestrates CrewAI agents for research tasks.
     
-    def step_callback(formatted_answer):
-        """Callback function that logs agent steps during execution.
-        This function is called by CrewAI with the formatted answer from each agent step.
+    Manages the creation of agents, tasks, and crew coordination for
+    comprehensive research with optional search tool integration.
+    """
+    
+    def __init__(self, config: AppConfig):
         """
-        # Try to determine which agent is responding based on content of the answer
-        agent_role = "Agent"  # Default role
+        Initialize research engine with configuration.
         
-        # Look for clues in the formatted answer to identify the agent
-        if "research" in formatted_answer.lower() and any(term in formatted_answer.lower() for term in ["found", "searched", "discovered", "information", "sources"]):
-            agent_role = "Research Specialist"
-        elif "analy" in formatted_answer.lower() and any(term in formatted_answer.lower() for term in ["pattern", "trend", "insight", "data", "findings"]):
-            agent_role = "Information Analyst"
-        elif any(term in formatted_answer.lower() for term in ["report", "article", "summary", "write", "written", "document"]):
-            agent_role = "Content Writer"
+        Args:
+            config: Application configuration object
+        """
+        self.config = config
+        self.tools: List[BaseTool] = []
         
-        # Log the response from the agent with the determined role
-        agent_logger.log_output(agent_role, formatted_answer[:5000] + ("..." if len(formatted_answer) > 5000 else ""))
+    def setup_tools(self):
+        """Setup search tools based on configuration."""
+        self.tools = []
         
-        # After a response, log a placeholder for the next input
-        # This creates a more conversational view in the UI
-        if agent_role == "Research Specialist":
-            next_agent = "Information Analyst"
-            agent_logger.log_input(next_agent, "Analyzing research findings...")
-        elif agent_role == "Information Analyst":
-            next_agent = "Content Writer"
-            agent_logger.log_input(next_agent, "Preparing to write report based on analysis...")
-            
-    return step_callback
-
-# Modify function to support LinkUp and no-tool option
-def run_crewai_research(topic, focus=None, gemini_api_key=None,
-                        google_search_api_key=None, google_search_cx=None, 
-                        search_provider="No Search Tool (Use LLM Knowledge Only)",
-                        model="gemini/gemini-1.5-flash", temp=0.7, show_details=False):
-    """
-    Run a research task using CrewAI and return the results
-    """
-    if not gemini_api_key:
-        return "ERROR: Please enter your Gemini API key in the sidebar."
-    
-    if search_provider == "Google Search" and (not google_search_api_key or not google_search_cx):
-        return "ERROR: Please enter your Google Search API Key and Custom Search Engine ID (CX) in the sidebar for Google Search."
-
-    if not topic:
-        return "ERROR: Please enter a research topic."
-    
-    try:
-        # Set up progress message
-        progress_placeholder.info("Initializing research agents...")
-        
-        # Initialize agent logger
-        agent_logger = AgentLogger(agent_logs_container, show_details=show_details)
-        
-        # Pre-populate the logger with task descriptions to create the narrative flow
-        if show_details:
-            agent_logger.log_input(
-                "Research Specialist", 
-                f"Research task: Thoroughly research the topic '{topic}{': ' + focus if focus else ''}' and provide comprehensive information."
+        if self.config.search_provider == SearchProvider.GOOGLE_SEARCH:
+            search_tool = GoogleSearchTool(
+                api_key=self.config.google_search_api_key,
+                cx=self.config.google_search_cx
             )
+            self.tools.append(search_tool)
+    
+    def create_llm(self) -> LLM:
+        """
+        Create and configure Gemini LLM instance.
         
-        # Initialize output capture to redirect terminal output to UI
-        stdout_capture = OutputCapture(agent_logger=agent_logger if show_details else None)
-        sys.stdout = stdout_capture
-        
-        # Initialize Gemini LLM
-        gemini_llm = LLM(
-            model=model,
-            api_key=gemini_api_key,
-            temperature=temp,
+        Returns:
+            Configured LLM instance
+        """
+        return LLM(
+            model=self.config.model.value,
+            api_key=self.config.gemini_api_key,
+            temperature=self.config.temperature,
         )
+    
+    def create_agents(self, topic: str, llm: LLM) -> tuple[Agent, Agent, Agent]:
+        """
+        Create specialized research agents.
         
-        # Initialize the appropriate search tool based on selection
-        tools = []
-        if search_provider == "Google Search":
-            search_tool = GoogleSearchTool(api_key=google_search_api_key, cx=google_search_cx)
-            tools = [search_tool]
-            progress_placeholder.info("Initializing Google Search tool...")
-        else:
-            # No search tool option
-            progress_placeholder.info("Running without search tools (using LLM knowledge only)...")
-        
-        # Include focus in the topic if provided
-        full_topic = f"{topic}{': ' + focus if focus else ''}"
-        
-        # Create researcher agent with verbose enabled
-        progress_placeholder.info("Creating research specialist agent...")
+        Args:
+            topic: Research topic
+            llm: Language model instance
+            
+        Returns:
+            Tuple of (researcher, analyst, writer) agents
+        """
         researcher = Agent(
             role="Research Specialist",
-            goal=f"Research {full_topic} thoroughly and provide comprehensive information",
+            goal=f"Research {topic} thoroughly and provide comprehensive information",
             backstory="You are an expert researcher with a talent for finding detailed information on any subject.",
             verbose=True,
-            llm=gemini_llm,
-            tools=tools
+            llm=llm,
+            tools=self.tools
         )
         
-        # Create analyst agent with verbose enabled
-        progress_placeholder.info("Creating information analyst agent...")
         analyst = Agent(
             role="Information Analyst",
-            goal=f"Analyze research findings on {full_topic} and extract key insights",
+            goal=f"Analyze research findings on {topic} and extract key insights",
             backstory="You are a skilled analyst with expertise in synthesizing information and identifying patterns.",
             verbose=True,
-            llm=gemini_llm,
-            tools=tools
+            llm=llm,
+            tools=self.tools
         )
         
-        # Create writer agent with verbose enabled
-        progress_placeholder.info("Creating content writer agent...")
         writer = Agent(
             role="Content Writer",
-            goal=f"Create a well-structured, informative report on {full_topic}",
+            goal=f"Create a well-structured, informative report on {topic}",
             backstory="You are a talented writer with a knack for clarity and engaging content.",
             verbose=True,
-            llm=gemini_llm
+            llm=llm
         )
         
-        # Adjust task descriptions based on whether we're using search tools
-        search_instruction = ""
-        if search_provider not in ["No Search Tool (Use LLM Knowledge Only)"]:
-            search_instruction = "Use the search tool to gather comprehensive information including recent developments, key concepts, historical context, and relevant statistics. Verify information from multiple sources when possible."
+        return researcher, analyst, writer
+    
+    def create_tasks(self, topic: str, researcher: Agent, analyst: Agent, writer: Agent) -> List[Task]:
+        """
+        Create research tasks with proper dependencies.
         
-        # Create research task
-        progress_placeholder.info("Defining research tasks...")
+        Args:
+            topic: Research topic
+            researcher: Research agent
+            analyst: Analysis agent
+            writer: Writing agent
+            
+        Returns:
+            List of configured tasks
+        """
+        # Determine search instructions based on provider
+        search_instruction = ""
+        if self.config.search_provider != SearchProvider.NO_SEARCH:
+            search_instruction = (
+                "Use the search tool to gather comprehensive information including "
+                "recent developments, key concepts, historical context, and relevant "
+                "statistics. Verify information from multiple sources when possible."
+            )
+        
         research_task = Task(
-            description=f"Research the topic: {full_topic}. {search_instruction}",
+            description=f"Research the topic: {topic}. {search_instruction}",
             agent=researcher,
             expected_output="Detailed research findings with all relevant information and sources."
         )
         
-        # Create analysis task
         verify_instruction = ""
-        if search_provider not in ["No Search Tool (Use LLM Knowledge Only)"]:
+        if self.config.search_provider != SearchProvider.NO_SEARCH:
             verify_instruction = "Use the search tool to verify or expand on information as needed."
             
         analysis_task = Task(
-            description=f"Analyze the research findings on {full_topic}. Identify key trends, patterns, insights, and implications. {verify_instruction}",
+            description=(
+                f"Analyze the research findings on {topic}. Identify key trends, "
+                f"patterns, insights, and implications. {verify_instruction}"
+            ),
             agent=analyst,
             expected_output="In-depth analysis with key insights, trends, and interpretation of the research findings.",
             context=[research_task]
         )
         
-        # Create writing task
         writing_task = Task(
-            description=f"Using the research and analysis, create a comprehensive report on {full_topic}. The report should be well-structured, informative, and accessible to a general audience.",
+            description=(
+                f"Using the research and analysis, create a comprehensive report on {topic}. "
+                "The report should be well-structured, informative, and accessible to a general audience."
+            ),
             agent=writer,
             expected_output="A complete, well-structured report on the topic with all key information presented clearly.",
             context=[analysis_task]
         )
         
-        # Create crew
-        progress_placeholder.info("Assembling AI research crew...")
-        crew = Crew(
-            agents=[researcher, analyst, writer],
-            tasks=[research_task, analysis_task, writing_task],
-            verbose=True,
-            process=Process.sequential
+        return [research_task, analysis_task, writing_task]
+    
+    def execute_research(self, topic: str, agent_logger: Optional[AgentLogger] = None) -> str:
+        """
+        Execute research workflow using CrewAI.
+        
+        Args:
+            topic: Research topic
+            agent_logger: Optional logger for UI updates
+            
+        Returns:
+            Research results as string
+            
+        Raises:
+            Exception: If research execution fails
+        """
+        # Setup output capture
+        stdout_capture = OutputCapture(agent_logger=agent_logger)
+        original_stdout = sys.stdout
+        
+        try:
+            sys.stdout = stdout_capture
+            
+            # Initialize components
+            self.setup_tools()
+            llm = self.create_llm()
+            researcher, analyst, writer = self.create_agents(topic, llm)
+            tasks = self.create_tasks(topic, researcher, analyst, writer)
+            
+            # Create and run crew
+            crew = Crew(
+                agents=[researcher, analyst, writer],
+                tasks=tasks,
+                verbose=True,
+                process=Process.sequential
+            )
+            
+            result = crew.kickoff()
+            
+            # Extract result content
+            if hasattr(result, 'raw'):
+                return result.raw
+            else:
+                return str(result)
+                
+        finally:
+            sys.stdout = original_stdout
+
+
+def initialize_session_state():
+    """Initialize Streamlit session state with default values."""
+    defaults = {
+        "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
+        "google_search_api_key": os.environ.get("GOOGLE_SEARCH_API_KEY", ""),
+        "google_search_cx": os.environ.get("GOOGLE_SEARCH_CX", "")
+    }
+    
+    for key, default_value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
+
+
+def setup_page():
+    """Configure Streamlit page settings and display header."""
+    st.set_page_config(
+        page_title="AICrew Research Agent",
+        page_icon="🔍",
+        layout="wide"
+    )
+    
+    st.title("🔍 AICrew Research Agent")
+    st.markdown("Research any topic using multiple AI agents powered by Gemini")
+
+
+def create_sidebar_config() -> AppConfig:
+    """
+    Create sidebar configuration interface and return AppConfig.
+    
+    Returns:
+        Configured AppConfig object
+    """
+    with st.sidebar:
+        st.header("Configuration")
+        
+        # Search provider selection
+        search_provider_str = st.selectbox(
+            "Search Provider",
+            options=[provider.value for provider in SearchProvider],
+            index=0,
+            help="Select which search API to use for research, or use no search tool"
         )
+        search_provider = SearchProvider(search_provider_str)
         
-        # Run the crew
+        # API key inputs
+        gemini_api_key = st.text_input(
+            "Gemini API Key",
+            value=st.session_state.gemini_api_key,
+            type="password",
+            help="Enter your Gemini API key from Google AI Studio"
+        )
+        st.session_state.gemini_api_key = gemini_api_key
+        
+        google_search_api_key = ""
+        google_search_cx = ""
+        
+        if search_provider == SearchProvider.GOOGLE_SEARCH:
+            google_search_api_key = st.text_input(
+                "Google Search API Key",
+                value=st.session_state.google_search_api_key,
+                type="password",
+                help="Enter your Google Cloud API key enabled for Custom Search API"
+            )
+            st.session_state.google_search_api_key = google_search_api_key
+            
+            google_search_cx = st.text_input(
+                "Google Custom Search Engine ID (CX)",
+                value=st.session_state.google_search_cx,
+                type="password",
+                help="Enter your Google Custom Search Engine ID (CX)"
+            )
+            st.session_state.google_search_cx = google_search_cx
+        
+        # Advanced options
+        with st.expander("Advanced Options"):
+            temperature = st.slider(
+                "Temperature", 
+                min_value=0.0, 
+                max_value=1.0, 
+                value=0.7, 
+                step=0.1,
+                help="Higher values make output more creative, lower values more deterministic"
+            )
+            
+            model_str = st.selectbox(
+                "Gemini Model",
+                options=[model.value for model in ModelConfig],
+                index=0,
+                help="Select which Gemini model to use"
+            )
+            model = ModelConfig(model_str)
+            
+            show_agent_details = st.checkbox(
+                "Show detailed agent interactions",
+                value=False, 
+                help="Display detailed input/output for each agent during the research process"
+            )
+        
+        # About section
+        st.markdown("### About")
+        st.markdown("""
+        This application uses:
+        - **CrewAI**: To orchestrate multiple AI agents
+        - **Google Gemini**: For AI language capabilities  
+        - **Search Options**:
+          - No Search Tool (relies on LLM knowledge)
+          - Google Search for web search (requires Google Search API Key and CX ID)
+        - **Streamlit**: For the user interface
+
+        No data is stored persistently - all processing happens in your local session.
+        """)
+    
+    return AppConfig(
+        gemini_api_key=gemini_api_key or "",
+        google_search_api_key=google_search_api_key or "",
+        google_search_cx=google_search_cx or "",
+        search_provider=search_provider,
+        temperature=temperature,
+        model=model,
+        show_agent_details=show_agent_details
+    )
+
+
+def create_research_interface() -> tuple[str, Optional[str]]:
+    """
+    Create research input interface.
+    
+    Returns:
+        Tuple of (research_topic, research_focus)
+    """
+    research_topic = st.text_input(
+        "Research Topic",
+        placeholder="Enter a topic to research (e.g., Quantum Computing, Climate Change)",
+        help="Be specific for better results"
+    )
+    
+    research_focus = None
+    with st.expander("Research Focus (Optional)"):
+        research_focus = st.text_area(
+            "Specific aspects to focus on",
+            placeholder="Enter any specific aspects you want the research to focus on...",
+            help="Leave blank for a general overview"
+        )
+        if not research_focus.strip():
+            research_focus = None
+    
+    return research_topic, research_focus
+
+
+def execute_research_workflow(config: AppConfig, topic: str, focus: Optional[str] = None) -> str:
+    """
+    Execute the complete research workflow.
+    
+    Args:
+        config: Application configuration
+        topic: Research topic
+        focus: Optional research focus
+        
+    Returns:
+        Research results as string
+    """
+    # Validate configuration
+    is_valid, error_message = config.is_valid_for_research()
+    if not is_valid:
+        return f"ERROR: {error_message}"
+    
+    if not topic.strip():
+        return "ERROR: Please enter a research topic."
+    
+    # Build full topic including focus
+    full_topic = f"{topic}{': ' + focus if focus else ''}"
+    
+    # Initialize UI components
+    progress_placeholder = st.empty()
+    agent_logs_container = st.container()
+    
+    try:
+        # Setup progress tracking
+        progress_placeholder.info("Initializing research agents...")
+        
+        # Initialize agent logger
+        agent_logger = AgentLogger(agent_logs_container, config.show_agent_details)
+        
+        # Create and execute research
+        engine = ResearchEngine(config)
+        
+        progress_placeholder.info("Assembling AI research crew...")
         progress_placeholder.warning("Research in progress... This may take several minutes.")
-        result = crew.kickoff()
+        
+        result = engine.execute_research(full_topic, agent_logger)
+        
         progress_placeholder.success("Research completed successfully!")
-        
-        # Restore original stdout
-        sys.stdout = stdout_capture.terminal_stdout
-        
-        # Extract the content as string from CrewOutput object
-        if hasattr(result, 'raw'):
-            return result.raw
-        else:
-            # In case the structure changes, try to get a string representation
-            return str(result)
+        return result
         
     except Exception as e:
-        # Make sure to restore stdout in case of error
-        if 'stdout_capture' in locals():
-            sys.stdout = stdout_capture.terminal_stdout
-            
+        progress_placeholder.error("Research failed!")
         import traceback
         error_details = traceback.format_exc()
-        progress_placeholder.error("Research failed!")
-        return f"ERROR: {str(e)}\n\n{error_details}"
+        return f"ERROR: {str(e)}\n\nDetails:\n{error_details}"
 
-# Run research when button is clicked
-if start_research:
-    # Check for API keys in session state, NOT in environment variables
-    if not st.session_state.gemini_api_key:
-        progress_placeholder.error("Please enter your Gemini API key in the sidebar")
-    elif search_provider == "Google Search":
-        if not st.session_state.google_search_api_key:
-            progress_placeholder.error("Please enter your Google Search API Key in the sidebar")
-        elif not st.session_state.google_search_cx:
-            progress_placeholder.error("Please enter your Google Custom Search Engine ID (CX) in the sidebar")
-        else:
-            with results_container:
-                with st.spinner("Running research..."):
-                    research_result = run_crewai_research(
-                        topic=research_topic,
-                        focus=research_focus if research_focus else None,
-                        gemini_api_key=st.session_state.gemini_api_key,
-                        search_provider=search_provider,
-                        google_search_api_key=st.session_state.google_search_api_key if search_provider == "Google Search" else None,
-                        google_search_cx=st.session_state.google_search_cx if search_provider == "Google Search" else None,
-                        model=gemini_model,
-                        temp=temperature,
-                        show_details=show_agent_details
-                    )
-                    st.markdown("## Research Results")
-                    st.markdown(research_result if research_result else ':red[No results or an error occurred. Please check your API keys and try again.]')
-    else:
-        with results_container:
+
+def main():
+    """Main application entry point."""
+    # Initialize application
+    setup_page()
+    initialize_session_state()
+    
+    # Create configuration interface
+    config = create_sidebar_config()
+    
+    # Create research interface
+    research_topic, research_focus = create_research_interface()
+    
+    # Research execution
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        start_research = st.button("Start Research", type="primary", use_container_width=True)
+    
+    # Execute research when button clicked
+    if start_research:
+        with st.container():
             with st.spinner("Running research..."):
-                research_result = run_crewai_research(
+                research_result = execute_research_workflow(
+                    config=config,
                     topic=research_topic,
-                    focus=research_focus if research_focus else None,
-                    gemini_api_key=st.session_state.gemini_api_key,
-                    search_provider=search_provider,
-                    google_search_api_key=st.session_state.google_search_api_key if search_provider == "Google Search" else None,
-                    google_search_cx=st.session_state.google_search_cx if search_provider == "Google Search" else None,
-                    model=gemini_model,
-                    temp=temperature,
-                    show_details=show_agent_details
+                    focus=research_focus
                 )
+                
                 st.markdown("## Research Results")
-                st.markdown(research_result if research_result else ':red[No results or an error occurred. Please check your API keys and try again.]')
+                if research_result and not research_result.startswith("ERROR:"):
+                    st.markdown(research_result)
+                else:
+                    st.error(research_result or "No results or an error occurred. Please check your configuration and try again.")
+
+
+if __name__ == "__main__":
+    main()

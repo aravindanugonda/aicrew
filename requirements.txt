@@ -1,6 +1,5 @@
 crewai
 streamlit
 python-dotenv
-google-generativeai
-crewai-tools
+requests
 pysqlite3-binary
