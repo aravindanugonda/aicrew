@@ -6,11 +6,10 @@ A powerful multi-agent AI research tool built with CrewAI and Streamlit that lev
 
 - **Multi-Agent Research**: Employs a team of specialized AI agents (Researcher, Analyst, and Writer) working collaboratively
 - **Multiple Search Providers**:
-  - **No Search Tool**: Rely solely on Gemini's built-in knowledge
+  - **No Search Tool**: Rely solely on Gemini's or OpenAI's built-in knowledge
   - **Google Search**: Integrate with Google Search for comprehensive web search capabilities
-- **Interactive UI**: User-friendly Streamlit interface with detailed logging of agent activities
-- **Customizable Research**: Optional focus areas for targeted research
-- **Advanced LLM Options**: Control temperature and model selection
+- **Interactive UI**: User-friendly Streamlit interface
+- **Advanced LLM Options**: Control temperature and model selection; model name updates automatically when provider changes
 
 ## Installation
 
@@ -53,10 +52,13 @@ pip install -r requirements.txt
 
 The application requires API keys for the following services:
 
-1. **Google Gemini API Key**: Required for all modes
+1. **Google Gemini API Key**: Required for Gemini provider
    - Get your API key from [Google AI Studio](https://ai.google.dev/)
 
-2. **Google Search API Key and Custom Search Engine ID (CX)**: Only required if using Google Search
+2. **OpenAI API Key**: Required for OpenAI provider
+   - Get your API key from [OpenAI](https://platform.openai.com/)
+
+3. **Google Search API Key and Custom Search Engine ID (CX)**: Only required if using Google Search
    - Get your API key from your Google Cloud Console (enable the Custom Search API)
    - Set up a Custom Search Engine and obtain the CX ID
 
@@ -65,6 +67,7 @@ You can provide these keys directly in the app UI or set them as environment var
 ```bash
 # Add to your .env file
 GEMINI_API_KEY=your_gemini_api_key
+OPENAI_API_KEY=your_openai_api_key
 GOOGLE_SEARCH_API_KEY=your_google_search_api_key
 GOOGLE_SEARCH_CX=your_google_search_cx
 ```
@@ -83,19 +86,20 @@ This will start the application and open it in your default web browser.
 
 1. Enter your API keys in the sidebar if not already set as environment variables
 2. Select a search provider (or no search tool to use only the LLM's knowledge)
-3. Enter a research topic
-4. Optionally enter specific aspects to focus on
-5. Click "Start Research"
-6. View the detailed agent interactions and final research results
+3. Select a model provider (Gemini or OpenAI)
+4. The model name field updates automatically with a recommended default for the selected provider (you can override it)
+5. Enter a research topic
+6. Click "Start Research"
+7. View the research results
 
 ## Search Provider Options
 
 ### No Search Tool (LLM Knowledge Only)
 
-- Uses only the Gemini model's built-in knowledge
+- Uses only the selected model provider's built-in knowledge (Gemini or OpenAI)
 - Faster response times
 - Best for general knowledge topics or where up-to-date information isn't critical
-- No additional API keys required
+- No additional API keys required (except Gemini or OpenAI key)
 
 ### Google Search Integration
 
@@ -116,8 +120,8 @@ You can now use Google Search as a research tool in addition to Gemini's LLM kno
 In the "Advanced Options" section of the sidebar, you can:
 
 - Adjust temperature (0.0-1.0): Lower values make responses more deterministic, higher values more creative
-- Select Gemini model: Choose between Gemini 2.0 Flash (faster) or Gemini 1.5 Flash (more capable)
-- Enable/disable detailed agent interactions
+- Select model provider (Gemini or OpenAI)
+- The model name field updates automatically to a recommended default when you change the provider
 
 ## How It Works
 
