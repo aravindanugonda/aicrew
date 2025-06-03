@@ -25,7 +25,6 @@ class AppConfig:
     temperature: float = 0.7
     model_provider: str = "Gemini"
     model_name: str = "gemini/gemini-2.0-flash-lite"
-    # show_agent_details removed
     crew_type: str = "research"
 
 class GoogleSearchInput(BaseModel):
@@ -114,70 +113,88 @@ class CrewOrchestrator:
 class ResearchCrew(CrewOrchestrator):
     """Specialized crew for research tasks"""
     def create_crew(self, topic: str) -> Crew:
-        llm = self.create_llm()
-        
-        # Create research agents
-        researcher = Agent(
-            role="Principal Research Specialist",
-            goal=f"Conduct an exhaustive, source-verified literature and data review on {topic}.",
-            backstory="A PhD-level researcher celebrated for rigorous methodology, advanced search strategies, "
-                      "and the ability to surface hidden insights from vast information pools.",
-            verbose=True,
-            llm=llm,
-            tools=self.tools
+        # Run the researcher agent with three different temperatures
+        outputs = []
+        for temp in [0.7, 0.3, 1.0]:
+            llm = self.create_llm()
+            llm.temperature = temp
+            researcher = Agent(
+                role="Principal Research Specialist",
+                goal=f"Conduct an exhaustive, source-verified literature and data review on {topic}.",
+                backstory="A PhD-level researcher celebrated for rigorous methodology, advanced search strategies, "
+                          "and the ability to surface hidden insights from vast information pools.",
+                verbose=True,
+                llm=llm,
+                tools=self.tools
+            )
+            research_task = Task(
+                description=f"Perform a comprehensive literature and data search on {topic}, citing at least 10 high-quality, authoritative sources.",
+                agent=researcher,
+                expected_output="Markdown dossier containing:\n"
+                                "• Annotated bibliography\n"
+                                "• Bullet-point summary of key findings\n"
+                                "• Relevant statistics or data tables"
+            )
+            crew = Crew(
+                agents=[researcher],
+                tasks=[research_task],
+                verbose=True,
+                process=Process.sequential
+            )
+            outputs.append(str(crew.kickoff()))
+        combined_research = "\n\n---\n\n".join(outputs)
+        # Create a dummy agent and Task to hold the combined output
+        dummy_agent = Agent(
+            role="Combined Output",
+            goal="Hold combined research output for context",
+            backstory="Holds the combined research output from multiple LLM temperature runs for downstream analysis.",
+            llm=None,
+            verbose=False
         )
-        
+        combined_research_task = Task(
+            description="Combined research output from multiple temperatures.",
+            agent=dummy_agent,
+            expected_output=combined_research
+        )
+        llm = self.create_llm()  # Use default temperature for analyst and writer
         analyst = Agent(
             role="Senior Insight Analyst",
-            goal=f"Synthesize the collected material on {topic} to reveal patterns, correlations, and knowledge gaps.",
-            backstory="Former intelligence analyst skilled in critical thinking, bias detection, and crafting data-driven narratives.",
+            goal=f"Synthesize the collected material on {topic} to reveal patterns, correlations, and knowledge gaps. Preserve all original formatting, tables, and code blocks from the context in your output. Use a clear, friendly, and accessible tone—avoid excessive formality. If you reference a table, copy it verbatim.",
+            backstory="Former intelligence analyst skilled in critical thinking, bias detection, and crafting data-driven narratives. Known for making complex topics approachable and engaging.",
             verbose=True,
             llm=llm,
             tools=self.tools
         )
-        
         writer = Agent(
             role="Lead Content Strategist & Writer",
-            goal=f"Transform the analysis on {topic} into a clear, engaging, publication-ready report for an informed lay audience.",
-            backstory="Award-winning science communicator known for turning complex findings into compelling stories.",
+            goal=f"Transform the analysis on {topic} into a clear, engaging, publication-ready report for an informed lay audience. Preserve all tables and code blocks from the context. Use a conversational, friendly, and accessible tone—avoid excessive formality. Minimize the use of asterisks or bullet points; prefer short paragraphs and plain markdown lists. If you reference a table, copy it verbatim as markdown.",
+            backstory="Award-winning science communicator known for turning complex findings into compelling, easy-to-read stories for everyone.",
             verbose=True,
             llm=llm
         )
-        
-        # Create research tasks
-        research_task = Task(
-            description=f"Perform a comprehensive literature and data search on {topic}, citing at least 10 high-quality, authoritative sources.",
-            agent=researcher,
-            expected_output="Markdown dossier containing:\n"
-                            "• Annotated bibliography\n"
-                            "• Bullet-point summary of key findings\n"
-                            "• Relevant statistics or data tables"
-        )
-        
         analysis_task = Task(
-            description=f"Critically evaluate the research dossier on {topic}, extract insights, spot trends, and highlight unanswered questions.",
+            description=f"Critically evaluate the research dossier on {topic}, extract insights, spot trends, and highlight unanswered questions. Preserve all original formatting, tables, and code blocks from the context in your output. Use a clear, friendly, and accessible tone—avoid excessive formality. Minimize the use of asterisks or bullet points; prefer short paragraphs and plain markdown lists.",
             agent=analyst,
             expected_output="Insight report including:\n"
-                            "• Key themes and patterns\n"
-                            "• Implications and potential applications\n"
-                            "• Identified knowledge gaps",
-            context=[research_task]
+                            "- Key themes and patterns (in plain markdown lists, not asterisks)\n"
+                            "- Implications and potential applications\n"
+                            "- Identified knowledge gaps\n"
+                            "- All tables and code blocks from the context must be preserved as markdown.",
+            context=[combined_research_task]
         )
-        
         writing_task = Task(
-            description=f"Draft a well-structured, reader-friendly report on {topic} that integrates the analyst’s insights with narrative flow.",
+            description=f"Draft a well-structured, reader-friendly report on {topic} that integrates the analyst’s insights with narrative flow. Preserve all tables and code blocks from the context. Use a conversational, friendly, and accessible tone—avoid excessive formality. Minimize the use of asterisks or bullet points; prefer short paragraphs and plain markdown lists. If you reference a table, copy it verbatim as markdown.",
             agent=writer,
-            expected_output="Final report (≈1,500 words) featuring:\n"
-                            "• Executive summary\n"
-                            "• Main body with sub-headings\n"
-                            "• Conclusion and future outlook\n"
-                            "• Proper in-text citations and reference list",
+            expected_output="Final report (≈3,600 words) featuring:\n"
+                            "- Main body with sub-headings\n"
+                            "- Conclusion and future outlook\n"
+                            "- All tables and code blocks from the context must be preserved as markdown.\n"
+                            "- Use plain markdown lists and short paragraphs, not asterisks or excessive bullet points.",
             context=[analysis_task]
         )
-        
         return Crew(
-            agents=[researcher, analyst, writer],
-            tasks=[research_task, analysis_task, writing_task],
+            agents=[analyst, writer],
+            tasks=[analysis_task, writing_task],
             verbose=True,
             process=Process.sequential
         )
@@ -185,17 +202,49 @@ class ResearchCrew(CrewOrchestrator):
 class StockAnalysisCrew(CrewOrchestrator):
     """Specialized crew for stock market analysis"""
     def create_crew(self, topic: str) -> Crew:
-        llm = self.create_llm()
-        
-        researcher = Agent(
-            role="Equity Research Analyst",
-            goal=f"Gather macro-economic, sector-specific, and company-level information relevant to {topic}.",
-            backstory="Chartered Financial Analyst (CFA) with 10+ years in sell-side equity research covering multiple sectors.",
-            verbose=True,
-            llm=llm,
-            tools=self.tools
+        # Run the researcher agent with three different temperatures
+        outputs = []
+        for temp in [0.7, 0.3, 1.0]:
+            llm = self.create_llm()
+            llm.temperature = temp
+            researcher = Agent(
+                role="Equity Research Analyst",
+                goal=f"Gather macro-economic, sector-specific, and company-level information relevant to {topic}.",
+                backstory="Chartered Financial Analyst (CFA) with 10+ years in sell-side equity research covering multiple sectors.",
+                verbose=True,
+                llm=llm,
+                tools=self.tools
+            )
+            research_task = Task(
+                description=f"Compile a market intelligence brief on {topic}: recent news, financial statements, competitive landscape, and macro drivers.",
+                agent=researcher,
+                expected_output="Market research brief containing:\n"
+                                "• Company overview\n"
+                                "• Latest financial highlights\n"
+                                "• Sector and macro context\n"
+                                "• Key risks and opportunities")
+            crew = Crew(
+                agents=[researcher],
+                tasks=[research_task],
+                verbose=True,
+                process=Process.sequential
+            )
+            outputs.append(str(crew.kickoff()))
+        combined_research = "\n\n---\n\n".join(outputs)
+
+        dummy_agent = Agent(
+            role="Combined Output",
+            goal="Hold combined research output for context",
+            backstory="Holds the combined research output from multiple LLM temperature runs for downstream analysis.",
+            llm=None,
+            verbose=False
         )
-        
+        combined_research_task = Task(
+            description="Combined research output from multiple temperatures.",
+            agent=dummy_agent,
+            expected_output=combined_research
+        )
+        llm = self.create_llm()  # Use default temperature for analyst and strategist
         analyst = Agent(
             role="Senior Valuation Specialist",
             goal=f"Perform fundamental and technical valuation of {topic}, benchmarking against peers and historical performance.",
@@ -203,7 +252,6 @@ class StockAnalysisCrew(CrewOrchestrator):
             verbose=True,
             llm=llm
         )
-        
         strategist = Agent(
             role="Portfolio Strategy Lead",
             goal=f"Convert the valuation of {topic} into an actionable investment thesis with clear risk management guidelines.",
@@ -211,28 +259,16 @@ class StockAnalysisCrew(CrewOrchestrator):
             verbose=True,
             llm=llm
         )
-        
-        research_task = Task(
-            description=f"Compile a market intelligence brief on {topic}: recent news, financial statements, competitive landscape, and macro drivers.",
-            agent=researcher,
-            expected_output="Market research brief containing:\n"
-                            "• Company overview\n"
-                            "• Latest financial highlights\n"
-                            "• Sector and macro context\n"
-                            "• Source links"
-        )
-        
         analysis_task = Task(
             description=f"Create a detailed valuation model and technical assessment for {topic}.",
             agent=analyst,
             expected_output="Valuation report including:\n"
                             "• DCF summary table\n"
                             "• Key multiples vs. peers\n"
-                            "• Technical trend analysis (charts optional description)\n"
+                            "• Technical trend analysis\n"
                             "• Bull, base, bear price targets",
-            context=[research_task]
+            context=[combined_research_task]
         )
-        
         strategy_task = Task(
             description=f"Draft an investment strategy memo for {topic} outlining entry/exit levels, position sizing, and risk scenarios.",
             agent=strategist,
@@ -243,10 +279,9 @@ class StockAnalysisCrew(CrewOrchestrator):
                             "• Risk factors and mitigation",
             context=[analysis_task]
         )
-        
         return Crew(
-            agents=[researcher, analyst, strategist],
-            tasks=[research_task, analysis_task, strategy_task],
+            agents=[analyst, strategist],
+            tasks=[analysis_task, strategy_task],
             verbose=True,
             process=Process.sequential
         )

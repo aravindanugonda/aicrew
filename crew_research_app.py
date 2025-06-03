@@ -1,5 +1,9 @@
-import os
+# Use pysqlite3 as sqlite3 before any other imports
+__import__('pysqlite3')
 import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
+import os
 import streamlit as st
 from crew_orchestrator import (
     AppConfig,
@@ -36,7 +40,18 @@ def setup_page():
         page_icon="🤖",
         layout="wide"
     )
-    
+    # Inject custom CSS for more readable monospace font
+    st.markdown(
+        """
+        <style>
+        code, pre, .stCode, .stMarkdown code {
+            font-family: 'Fira Mono', 'JetBrains Mono', 'Source Code Pro', 'Menlo', 'Consolas', 'Monaco', 'monospace' !important;
+            font-size: 1.05em;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
     st.title("🤖 AICrew Orchestrator")
     st.markdown("Orchestrate multiple AI agents for different tasks")
 
@@ -120,14 +135,6 @@ def create_sidebar_config() -> AppConfig:
         
         # Advanced options
         with st.expander("Advanced Options"):
-            temperature = st.slider(
-                "Temperature",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.7,
-                step=0.1,
-                help="Higher values make output more creative, lower values more deterministic"
-            )
             # Provide examples based on selected provider
             if model_provider == "Gemini":
                 example = "gemini/gemini-2.0-flash-lite"
@@ -145,7 +152,7 @@ def create_sidebar_config() -> AppConfig:
         st.markdown("""
         This application uses:
         - **CrewAI**: To orchestrate multiple AI agents
-        - **Google Gemini**: For AI language capabilities
+        - **Google Gemini/OpenAI**: For AI language capabilities
         - **Streamlit**: For the user interface
         """)
     
@@ -155,7 +162,6 @@ def create_sidebar_config() -> AppConfig:
         google_search_api_key=google_search_api_key or "",
         google_search_cx=google_search_cx or "",
         search_provider=search_provider,
-        temperature=temperature,
         model_provider=model_provider,
         model_name=model_name,
         crew_type=crew_type
@@ -240,7 +246,7 @@ def main():
                 
                 st.markdown("## Task Results")
                 if result and not result.startswith("ERROR:"):
-                    st.markdown(result)
+                    st.markdown(result, unsafe_allow_html=True)
                 else:
                     st.error(result or "No results or an error occurred. Please check your configuration and try again.")
 
